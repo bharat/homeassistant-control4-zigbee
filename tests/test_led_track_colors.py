@@ -89,6 +89,12 @@ class TestTracksOtherEntity:
     def test_untracked(self) -> None:
         assert not SlotConfig(slot_id=2).tracks_other_entity
 
+    @pytest.mark.parametrize("led_mode", ["push_release", "follow_load"])
+    def test_non_fixed_mode_is_not_other(self, led_mode: str) -> None:
+        slot = _tracked_slot()
+        slot.led_mode = led_mode
+        assert not slot.tracks_other_entity
+
 
 class TestTrackingWritesLoadColors:
     """A load change on the device must not repaint a tracked LED."""
@@ -105,6 +111,18 @@ class TestTrackingWritesLoadColors:
             "c4.dmx.led 01 03 ffffff",
             "c4.dmx.led 01 04 ffffff",
         ]
+
+    @pytest.mark.asyncio
+    async def test_push_release_keeps_its_press_colors(
+        self, manager: Control4Manager, dimmer_state: DeviceState
+    ) -> None:
+        """A push_release slot's 03/04 hold its press flash, so leave them."""
+        slot = _tracked_slot()
+        slot.led_mode = "push_release"
+        _setup(manager, dimmer_state, slot)
+        listener = _state_listener(manager)
+        await listener(_event("light.living_room", "on"))
+        assert _sent(manager) == ["c4.dmx.led 01 05 ffffff"]
 
     @pytest.mark.asyncio
     async def test_off_writes_the_off_color(

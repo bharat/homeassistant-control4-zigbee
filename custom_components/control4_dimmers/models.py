@@ -27,9 +27,18 @@ class SlotConfig:
 
     @property
     def tracks_other_entity(self) -> bool:
-        """Return True when the LED follows an entity other than its own load."""
-        return bool(self.led_track_entity_id) and (
-            self.led_track_entity_id != "__self_load__"
+        """
+        Return True when a fixed LED follows an entity other than its own load.
+
+        Only fixed LEDs count: in push_release and follow_load the firmware
+        draws from the load-on and load-off colors itself, so overwriting
+        them with the tracked color would break the press flash or the
+        load-following colors.
+        """
+        return (
+            self.led_mode == "fixed"
+            and bool(self.led_track_entity_id)
+            and self.led_track_entity_id != "__self_load__"
         )
 
     def to_dict(self) -> dict[str, Any]:
