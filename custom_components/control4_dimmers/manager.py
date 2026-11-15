@@ -316,18 +316,23 @@ class Control4Manager:
             config = self._store.get_device(device.ieee_address)
             slot = self._find_slot(config, slot_id) if config else None
             behavior = slot.behavior if slot else "keypad"
-            # Scene on load-control: firmware handled the load, software
-            # syncs LED tracking. All three load behaviors now have
-            # matching firmware modes (00=on, 01=off, 02=toggle).
-            # Press on programmable: execute tap_action immediately
-            # (unless double_tap configured — handled by click_count).
+            # Load-control behaviors: the firmware switches the load itself
+            # on a physical press (push_config writes the matching firmware
+            # mode: 00=on, 01=off, 02=toggle) and a follow_load LED tracks
+            # the light state, so neither the press nor the scene frame may
+            # drive the load from software. Doing so switched the load a
+            # second time about a second later, and a toggle landing
+            # mid-ramp left the dimmer's remembered level near zero
+            # (issue #242). Explicit press_button service calls still act.
+            # Programmable buttons: the press frame executes tap_action
+            # immediately, unless double_tap is configured, in which case
+            # the click_count frame decides. The scene frame never acts.
             is_load = behavior in ("load_on", "load_off", "toggle_load")
-            should_act = (is_scene and is_load) or (
-                not is_scene
-                and not is_load
+            if (
+                not is_load
+                and not is_scene
                 and (not slot or not slot.double_tap_action)
-            )
-            if should_act:
+            ):
                 self._hass.async_create_task(
                     self._press_button_task(device.ieee_address, slot_id, "pressed"),
                     f"c4_action_{device.ieee_address}_{slot_id}",

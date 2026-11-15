@@ -1187,27 +1187,99 @@ class TestDispatchWithActions:
         # Should NOT create a task — firmware handles load control
         manager._hass.async_create_task.assert_not_called()
 
-    def test_scene_event_triggers_load_control(
+    @pytest.mark.parametrize("behavior", ["toggle_load", "load_on", "load_off"])
+    @pytest.mark.parametrize("frame", ["press", "scene"])
+    def test_physical_tap_on_load_control_never_acts_in_software(
+        self,
+        manager: Control4Manager,
+        dimmer_state: DeviceState,
+        behavior: str,
+        frame: str,
+    ) -> None:
+        """
+        A press or scene frame on a load-control slot only fires "pressed".
+
+        The firmware switches the load itself (issue #242): acting here too
+        toggled the light a second time about a second later, and a toggle
+        landing mid-ramp left the remembered level near zero. No task, no
+        light service call and no state publish may result from the frame.
+        """
+        manager._devices[IEEE_DIMMER] = dimmer_state
+        config = DeviceConfig(
+            ieee_address=IEEE_DIMMER,
+            friendly_name="Kitchen",
+            device_type="dimmer",
+            slots=[SlotConfig(slot_id=2, behavior=behavior, led_mode="follow_load")],
+        )
+        manager._store._devices[IEEE_DIMMER] = config
+        light_state = MagicMock()
+        light_state.entity_id = "light.kitchen"
+        light_state.attributes = {"friendly_name": "Kitchen"}
+        manager._hass.states.async_all.return_value = [light_state]
+        manager._hass.services.async_call = AsyncMock()
+        cb = MagicMock()
+        manager.register_event_callback(IEEE_DIMMER, 2, cb)
+        with patch.object(
+            manager, "async_send_mqtt", new_callable=AsyncMock
+        ) as mock_mqtt:
+            manager._dispatch_button_action(dimmer_state, f"button_2_{frame}")
+        assert [c.args[0] for c in cb.call_args_list] == ["pressed"]
+        manager._hass.async_create_task.assert_not_called()
+        manager._hass.services.async_call.assert_not_called()
+        mock_mqtt.assert_not_called()
+
+    @pytest.mark.parametrize("behavior", ["toggle_load", "load_on", "load_off"])
+    def test_full_tap_sequence_on_load_control_fires_pressed_once(
+        self,
+        manager: Control4Manager,
+        dimmer_state: DeviceState,
+        behavior: str,
+    ) -> None:
+        """
+        One tap (bp, sc, cc 01) on a load slot: one "pressed", no action.
+
+        On a dimmer, button 2 reports on the top half, which is slot 2.
+        """
+        manager._devices[IEEE_DIMMER] = dimmer_state
+        config = DeviceConfig(
+            ieee_address=IEEE_DIMMER,
+            friendly_name="Kitchen",
+            device_type="dimmer",
+            slots=[SlotConfig(slot_id=2, behavior=behavior, led_mode="follow_load")],
+        )
+        manager._store._devices[IEEE_DIMMER] = config
+        cb = MagicMock()
+        manager.register_event_callback(IEEE_DIMMER, 2, cb)
+        for action in ("button_2_press", "button_2_scene", "button_2_click_1"):
+            manager._dispatch_button_action(dimmer_state, action)
+        assert [c.args[0] for c in cb.call_args_list] == ["pressed", "single_tap"]
+        manager._hass.async_create_task.assert_not_called()
+
+    def test_scene_on_programmable_does_not_repeat_tap_action(
         self, manager: Control4Manager, dimmer_state: DeviceState
     ) -> None:
-        """Scene event (c4.dmx.sc) on load-control button triggers software."""
-        for behavior in ("toggle_load", "load_on", "load_off"):
-            manager._hass.reset_mock()
-            manager._devices[IEEE_DIMMER] = dimmer_state
-            config = DeviceConfig(
-                ieee_address=IEEE_DIMMER,
-                friendly_name="Kitchen",
-                device_type="dimmer",
-                slots=[
-                    SlotConfig(slot_id=2, behavior=behavior, led_mode="follow_load")
-                ],
-            )
-            manager._store._devices[IEEE_DIMMER] = config
-            manager._dispatch_button_action(dimmer_state, "button_2_scene")
-            (
-                manager._hass.async_create_task.assert_called(),
-                (f"Scene on {behavior} should dispatch"),
-            )
+        """A programmable slot acts on the press frame only, not the scene."""
+        manager._devices[IEEE_DIMMER] = dimmer_state
+        config = DeviceConfig(
+            ieee_address=IEEE_DIMMER,
+            friendly_name="Kitchen",
+            device_type="dimmer",
+            slots=[
+                SlotConfig(
+                    slot_id=2,
+                    behavior="keypad",
+                    led_mode="fixed",
+                    tap_action={
+                        "action": "light.toggle",
+                        "target": {"entity_id": "light.kitchen"},
+                    },
+                )
+            ],
+        )
+        manager._store._devices[IEEE_DIMMER] = config
+        manager._dispatch_button_action(dimmer_state, "button_2_press")
+        manager._dispatch_button_action(dimmer_state, "button_2_scene")
+        assert manager._hass.async_create_task.call_count == 1
 
     def test_press_defers_when_double_tap_configured(
         self, manager: Control4Manager, dimmer_state: DeviceState
@@ -1361,6 +1433,43 @@ class TestLoadControlBehavior:
         await manager.press_button(IEEE_DIMMER, 2)
         manager._hass.services.async_call.assert_awaited_once_with(
             "light", "toggle", {"entity_id": "light.kitchen"}
+        )
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("behavior", "svc"),
+        [("toggle_load", "toggle"), ("load_on", "turn_on"), ("load_off", "turn_off")],
+    )
+    async def test_press_button_service_on_load_slot_still_acts(
+        self,
+        manager: Control4Manager,
+        dimmer_state: DeviceState,
+        behavior: str,
+        svc: str,
+    ) -> None:
+        """
+        An explicit press_button call on a load slot drives the light.
+
+        Physical taps leave the load to the firmware (issue #242), but the
+        press_button service and the card are deliberate software presses
+        with no firmware action behind them, so they must still act.
+        """
+        manager._devices[IEEE_DIMMER] = dimmer_state
+        config = DeviceConfig(
+            ieee_address=IEEE_DIMMER,
+            friendly_name="Kitchen",
+            device_type="dimmer",
+            slots=[SlotConfig(slot_id=1, behavior=behavior, led_mode="follow_load")],
+        )
+        manager._store._devices[IEEE_DIMMER] = config
+        light_state = MagicMock()
+        light_state.entity_id = "light.kitchen"
+        light_state.attributes = {"friendly_name": "Kitchen"}
+        manager._hass.states.async_all.return_value = [light_state]
+        manager._hass.services.async_call = AsyncMock()
+        await manager.press_button(IEEE_DIMMER, 1)
+        manager._hass.services.async_call.assert_awaited_once_with(
+            "light", svc, {"entity_id": "light.kitchen"}
         )
 
     @pytest.mark.asyncio
