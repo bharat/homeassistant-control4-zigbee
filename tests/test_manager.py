@@ -7,6 +7,7 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from homeassistant.exceptions import HomeAssistantError
 
 from custom_components.control4_dimmers.manager import (
     C4_MODEL_IDS,
@@ -1855,3 +1856,253 @@ class TestGetDeviceInfo:
         assert info["device_type"] == "dimmer"
         assert info["config"]["slots"][0]["behavior"] == "load_on"
         assert info["config"]["slots"][0]["led_mode"] == "follow_load"
+
+
+# ── MQTT disconnect handling (issue #246) ────────────────────────────
+
+
+def _tracked_dimmer_config() -> DeviceConfig:
+    """Build a dimmer config whose slot 2 LED mirrors light.kitchen."""
+    return DeviceConfig(
+        ieee_address=IEEE_DIMMER,
+        friendly_name="Kitchen",
+        device_type="dimmer",
+        slots=[
+            SlotConfig(
+                slot_id=2,
+                behavior="keypad",
+                led_mode="fixed",
+                led_on_color="ffffff",
+                led_off_color="000000",
+                tap_action={
+                    "action": "light.toggle",
+                    "target": {"entity_id": "light.kitchen"},
+                },
+                led_track_entity_id="light.kitchen",
+            )
+        ],
+    )
+
+
+def _light_state(state: str) -> MagicMock:
+    light = MagicMock()
+    light.entity_id = "light.kitchen"
+    light.state = state
+    return light
+
+
+class TestMqttDisconnect:
+    """Publish failures are logged, and a reconnect re-syncs tracked LEDs."""
+
+    @pytest.fixture
+    def tracked_manager(
+        self, manager: Control4Manager, dimmer_state: DeviceState
+    ) -> Control4Manager:
+        manager._devices[IEEE_DIMMER] = dimmer_state
+        manager._store._devices[IEEE_DIMMER] = _tracked_dimmer_config()
+        manager.setup_light_tracking()
+        return manager
+
+    @staticmethod
+    def _state_listener(manager: Control4Manager) -> Any:
+        """Return the EVENT_STATE_CHANGED listener setup_light_tracking installed."""
+        return manager._hass.bus.async_listen.call_args[0][1]
+
+    @pytest.mark.asyncio
+    async def test_tracking_send_failure_logs_warning(
+        self,
+        tracked_manager: Control4Manager,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """A publish error during LED tracking is logged, not raised."""
+        listener = self._state_listener(tracked_manager)
+        event = MagicMock()
+        event.data = {"entity_id": "light.kitchen", "new_state": _light_state("on")}
+        with patch.object(
+            tracked_manager,
+            "async_send_mqtt",
+            new_callable=AsyncMock,
+            side_effect=HomeAssistantError("client is not currently connected"),
+        ):
+            await listener(event)  # must not raise
+        assert "LED tracking update for slot 2 for Kitchen not sent" in caplog.text
+        assert "client is not currently connected" in caplog.text
+        assert "Traceback" not in caplog.text
+
+    @pytest.mark.asyncio
+    async def test_tracking_sends_mode_05_when_connected(
+        self, tracked_manager: Control4Manager
+    ) -> None:
+        listener = self._state_listener(tracked_manager)
+        event = MagicMock()
+        event.data = {"entity_id": "light.kitchen", "new_state": _light_state("off")}
+        with patch.object(
+            tracked_manager, "async_send_mqtt", new_callable=AsyncMock
+        ) as mock_send:
+            await listener(event)
+        mock_send.assert_awaited_once_with(
+            IEEE_DIMMER, {"c4_cmd": "c4.dmx.led 01 05 000000"}
+        )
+
+    @pytest.mark.asyncio
+    async def test_reconnect_resends_tracked_leds(
+        self, tracked_manager: Control4Manager
+    ) -> None:
+        """Disconnect then reconnect re-sends the LED from the light's state."""
+        tracked_manager._hass.states.get.return_value = _light_state("on")
+        tracked_manager._on_mqtt_connection_change(connected=False)
+        tracked_manager._hass.async_create_task.assert_not_called()
+
+        tracked_manager._on_mqtt_connection_change(connected=True)
+        tracked_manager._hass.async_create_task.assert_called_once()
+        resync = tracked_manager._hass.async_create_task.call_args[0][0]
+        with patch.object(
+            tracked_manager, "async_send_mqtt", new_callable=AsyncMock
+        ) as mock_send:
+            sent = await resync
+        assert sent == 1
+        mock_send.assert_awaited_once_with(
+            IEEE_DIMMER, {"c4_cmd": "c4.dmx.led 01 05 ffffff"}
+        )
+        tracked_manager._hass.states.get.assert_called_with("light.kitchen")
+
+    def test_repeated_connected_reports_resync_once(
+        self, tracked_manager: Control4Manager
+    ) -> None:
+        """Only a not-connected -> connected edge schedules a resync."""
+        tracked_manager._on_mqtt_connection_change(connected=True)
+        tracked_manager._on_mqtt_connection_change(connected=True)
+        assert tracked_manager._hass.async_create_task.call_count == 1
+        # The scheduled coroutine is never run by the mock; close it.
+        tracked_manager._hass.async_create_task.call_args[0][0].close()
+
+    @pytest.mark.asyncio
+    async def test_resync_skips_unknown_light_state(
+        self, tracked_manager: Control4Manager
+    ) -> None:
+        tracked_manager._hass.states.get.return_value = None
+        with patch.object(
+            tracked_manager, "async_send_mqtt", new_callable=AsyncMock
+        ) as mock_send:
+            assert await tracked_manager.async_resync_tracked_leds() == 0
+        mock_send.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_resync_survives_publish_failure(
+        self,
+        tracked_manager: Control4Manager,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        tracked_manager._hass.states.get.return_value = _light_state("on")
+        with patch.object(
+            tracked_manager,
+            "async_send_mqtt",
+            new_callable=AsyncMock,
+            side_effect=HomeAssistantError("client is not currently connected"),
+        ):
+            assert await tracked_manager.async_resync_tracked_leds() == 0
+        assert "not sent, MQTT publish failed" in caplog.text
+
+    @pytest.mark.asyncio
+    async def test_async_start_subscribes_to_connection_status(
+        self, manager: Control4Manager
+    ) -> None:
+        unsub = MagicMock()
+        with (
+            patch(
+                "custom_components.control4_dimmers.manager.mqtt.async_subscribe",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                "custom_components.control4_dimmers.manager."
+                "mqtt.async_subscribe_connection_status",
+                return_value=unsub,
+            ) as mock_status,
+            patch.object(manager, "start_audit_sweep"),
+        ):
+            await manager.async_start()
+            mock_status.assert_called_once_with(
+                manager._hass, manager._on_mqtt_connection_change
+            )
+            assert unsub in manager._subscriptions
+            await manager.async_stop()
+        unsub.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_read_slot_publish_failure_returns_none(
+        self,
+        manager: Control4Manager,
+        dimmer_state: DeviceState,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """The audit/verify read treats a failed publish like a timeout."""
+        manager._devices[IEEE_DIMMER] = dimmer_state
+        with patch.object(
+            manager,
+            "async_send_mqtt",
+            new_callable=AsyncMock,
+            side_effect=HomeAssistantError("client is not currently connected"),
+        ):
+            assert await manager._read_slot(dimmer_state, 2) is None
+        assert "Verify read of slot 2 for Kitchen not sent" in caplog.text
+        assert manager._pending_verifies == {}
+
+    @pytest.mark.asyncio
+    async def test_audit_counts_unpublished_read_as_unread(
+        self,
+        manager: Control4Manager,
+        dimmer_state: DeviceState,
+        dimmer_config: DeviceConfig,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        manager._devices[IEEE_DIMMER] = dimmer_state
+        manager._store._devices[IEEE_DIMMER] = dimmer_config
+        with patch.object(
+            manager,
+            "async_send_mqtt",
+            new_callable=AsyncMock,
+            side_effect=HomeAssistantError("client is not currently connected"),
+        ):
+            summary = await manager.async_audit_device(IEEE_DIMMER)
+        assert summary is not None
+        assert summary["slots_unread"] == len(dimmer_config.slots)
+        assert summary["slots_checked"] == 0
+        assert "Traceback" not in caplog.text
+
+    @pytest.mark.asyncio
+    async def test_delayed_detect_failure_allows_retry(
+        self, manager: Control4Manager, dimmer_state: DeviceState
+    ) -> None:
+        manager._devices[IEEE_DIMMER] = dimmer_state
+        manager._detect_sent.add(IEEE_DIMMER)
+        with (
+            patch(
+                "custom_components.control4_dimmers.manager.asyncio.sleep",
+                new_callable=AsyncMock,
+            ),
+            patch.object(
+                manager,
+                "async_send_mqtt",
+                new_callable=AsyncMock,
+                side_effect=HomeAssistantError("client is not currently connected"),
+            ),
+        ):
+            await manager._async_delayed_detect(IEEE_DIMMER)
+        assert IEEE_DIMMER not in manager._detect_sent
+
+    @pytest.mark.asyncio
+    async def test_button_action_task_logs_publish_failure(
+        self,
+        manager: Control4Manager,
+        dimmer_state: DeviceState,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        manager._devices[IEEE_DIMMER] = dimmer_state
+        with patch.object(
+            manager,
+            "press_button",
+            new_callable=AsyncMock,
+            side_effect=HomeAssistantError("client is not currently connected"),
+        ):
+            await manager._press_button_task(IEEE_DIMMER, 2, "pressed")
+        assert "Button action for Kitchen slot 2 (pressed) failed" in caplog.text
