@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, Any, ClassVar
 from homeassistant.components import mqtt
 from homeassistant.const import EVENT_STATE_CHANGED
 from homeassistant.core import callback as ha_callback
+from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers.event import async_track_time_interval
 from homeassistant.util import dt as dt_util
@@ -137,6 +138,14 @@ class Control4Manager:
         # time), waiting for the other half of the press/scene pair.
         self._press_pairs: dict[tuple[str, int | str], tuple[str, float]] = {}
         self._light_track_unsubs: list[Callable[[], None]] = []  # state listeners
+        # resolved tracked entity_id -> [(ieee, slot_id, on_color, off_color)],
+        # rebuilt by setup_light_tracking. Kept so a reconnect can re-send
+        # every tracked LED (issue #246).
+        self._led_tracking: dict[str, list[tuple[str, int, str, str]]] = {}
+        # Last MQTT connection state reported by HA; None until the first
+        # report. A False -> True edge triggers the tracked LED resync.
+        self._mqtt_connected: bool | None = None
+        self._led_resync_task: asyncio.Task[None] | None = None
         self._led_cooldowns: dict[
             tuple[str, int], float
         ] = {}  # (ieee, slot) -> timestamp
@@ -320,7 +329,7 @@ class Control4Manager:
             )
             if should_act:
                 self._hass.async_create_task(
-                    self.press_button(device.ieee_address, slot_id, "pressed"),
+                    self._press_button_task(device.ieee_address, slot_id, "pressed"),
                     f"c4_action_{device.ieee_address}_{slot_id}",
                 )
             return
@@ -349,12 +358,14 @@ class Control4Manager:
                 # Only fires when double_tap is configured (debounced)
                 if slot and slot.double_tap_action:
                     self._hass.async_create_task(
-                        self.press_button(device.ieee_address, slot_id, "single_tap"),
+                        self._press_button_task(
+                            device.ieee_address, slot_id, "single_tap"
+                        ),
                         f"c4_action_{device.ieee_address}_{slot_id}",
                     )
             elif count == 2:  # noqa: PLR2004
                 self._hass.async_create_task(
-                    self.press_button(device.ieee_address, slot_id, "double_tap"),
+                    self._press_button_task(device.ieee_address, slot_id, "double_tap"),
                     f"c4_action_{device.ieee_address}_{slot_id}",
                 )
             return
@@ -416,6 +427,16 @@ class Control4Manager:
         )
         self._subscriptions.append(unsub_state)
 
+        # A publish while the broker is away fails, and a failed LED
+        # tracking push leaves the keypad showing the wrong color until
+        # the tracked light next changes. Re-sync every tracked LED once
+        # the connection is back (issue #246).
+        self._subscriptions.append(
+            mqtt.async_subscribe_connection_status(
+                self._hass, self._on_mqtt_connection_change
+            )
+        )
+
         self.start_audit_sweep()
         LOGGER.debug("Control4 manager started, subscribed to %s", topic)
 
@@ -425,6 +446,9 @@ class Control4Manager:
         if self._dimming_task is not None:
             self._dimming_task.cancel()
             self._dimming_task = None
+        if self._led_resync_task is not None:
+            self._led_resync_task.cancel()
+            self._led_resync_task = None
         for unsub in self._subscriptions:
             unsub()
         self._subscriptions.clear()
@@ -898,6 +922,14 @@ class Control4Manager:
                 # the shared push path and needs its own slot resolution.
                 await self._push_single_slot(state, config, slot_id)
                 settle = VERIFY_RETRY_SETTLE_MS / 1000
+        except HomeAssistantError as err:
+            # A re-push could not be published (MQTT away, issue #246).
+            LOGGER.warning(
+                "Verify pass for %s slot %d stopped, MQTT publish failed: %s",
+                state.friendly_name,
+                slot_id,
+                err,
+            )
         except Exception:  # noqa: BLE001
             LOGGER.exception(
                 "Verify pass errored for %s slot %d", state.friendly_name, slot_id
@@ -927,7 +959,13 @@ class Control4Manager:
         self._pending_verifies[key] = future
         self._verify_reads.pop(key, None)
         try:
-            await self.async_send_mqtt(ieee, {"c4_verify_slot": slot_id})
+            if not await self.async_try_send_mqtt(
+                ieee, {"c4_verify_slot": slot_id}, f"verify read of slot {slot_id}"
+            ):
+                # The read never left HA (typically the MQTT client is
+                # disconnected). Treat it like a timeout: the caller counts
+                # the slot unread and moves on (issue #246).
+                return None
             try:
                 await asyncio.wait_for(future, timeout=VERIFY_TIMEOUT_MS / 1000)
             except TimeoutError:
@@ -1231,6 +1269,14 @@ class Control4Manager:
                     await self._audit_slot(state, config, slot, mode, summary)
                 finally:
                     self._verifying.discard(key)
+        except HomeAssistantError as err:
+            # A heal could not be published (MQTT away, issue #246). The
+            # sweep picks this device up again on a later tick.
+            LOGGER.warning(
+                "Audit pass for %s stopped, MQTT publish failed: %s",
+                state.friendly_name,
+                err,
+            )
         except Exception:  # noqa: BLE001
             LOGGER.exception("Audit pass errored for %s", state.friendly_name)
         finally:
@@ -1669,9 +1715,10 @@ class Control4Manager:
                 is_on = target_state and target_state.state == "on"
                 color = slot.led_off_color if is_on else slot.led_on_color
                 wire_id = slot_id - 1
-                await self.async_send_mqtt(
+                await self.async_try_send_mqtt(
                     ieee,
                     {"c4_cmd": f"c4.dmx.led {wire_id:02x} 05 {color}"},
+                    f"optimistic LED for slot {slot_id}",
                 )
                 self._led_cooldowns[(ieee, slot_id)] = time.monotonic() + 2.0
                 return
@@ -1702,6 +1749,7 @@ class Control4Manager:
                             (ieee, slot.slot_id, slot.led_on_color, slot.led_off_color)
                         )
 
+        self._led_tracking = tracking
         if not tracking:
             LOGGER.debug("Light tracking: no tracked entities found")
             return
@@ -1721,13 +1769,12 @@ class Control4Manager:
                 cooldown = self._led_cooldowns.get((ieee, slot_id), 0)
                 if now < cooldown:
                     continue
-                wire_id = slot_id - 1
-                color = on_color if is_on else off_color
-                # Mode 05 = immediate override — forces the LED to display
-                # this color now, bypassing the on/off state logic.
-                await self.async_send_mqtt(
-                    ieee,
-                    {"c4_cmd": f"c4.dmx.led {wire_id:02x} 05 {color}"},
+                # HA runs this listener as a task nobody awaits, so a
+                # publish error here would only surface as "Task exception
+                # was never retrieved" (issue #246). _send_tracked_led logs
+                # it instead; the reconnect resync repairs the LED later.
+                await self._send_tracked_led(
+                    ieee, slot_id, on_color if is_on else off_color
                 )
 
         unsub = self._hass.bus.async_listen(EVENT_STATE_CHANGED, _on_state_changed)
@@ -1737,6 +1784,70 @@ class Control4Manager:
             len(tracking),
             list(tracking.keys()),
         )
+
+    async def _send_tracked_led(self, ieee: str, slot_id: int, color: str) -> bool:
+        """
+        Force a tracked slot's LED to a color; log instead of raise on failure.
+
+        Mode 05 = immediate override: the LED shows this color now,
+        bypassing the firmware's on/off state logic.
+        """
+        wire_id = slot_id - 1
+        return await self.async_try_send_mqtt(
+            ieee,
+            {"c4_cmd": f"c4.dmx.led {wire_id:02x} 05 {color}"},
+            f"LED tracking update for slot {slot_id}",
+        )
+
+    @ha_callback
+    def _on_mqtt_connection_change(self, connected: bool) -> None:  # noqa: FBT001
+        """
+        React to HA's MQTT connection status (issue #246).
+
+        Sends attempted while the client was away have failed and been
+        logged. Once the connection is back, re-send every tracked LED
+        so a lost update does not leave a keypad showing a stale color.
+        """
+        was_connected = self._mqtt_connected
+        self._mqtt_connected = connected
+        if not connected:
+            LOGGER.warning(
+                "MQTT disconnected; LED tracking updates will be dropped until "
+                "it reconnects"
+            )
+            return
+        if was_connected is True:
+            return
+        LOGGER.info("MQTT connected; re-syncing tracked LEDs")
+        if self._led_resync_task is not None and not self._led_resync_task.done():
+            return
+        self._led_resync_task = self._hass.async_create_task(
+            self.async_resync_tracked_leds(), "c4_led_resync"
+        )
+
+    async def async_resync_tracked_leds(self) -> int:
+        """
+        Re-send the LED color of every slot that tracks another entity.
+
+        Uses the tracked entities' current HA state, so the result is the
+        same as if every state change had been delivered. Returns the
+        number of LED commands sent.
+        """
+        sent = 0
+        for entity_id, slots in self._led_tracking.items():
+            target = self._hass.states.get(entity_id)
+            if target is None:
+                continue
+            is_on = target.state == "on"
+            for ieee, slot_id, on_color, off_color in slots:
+                if ieee not in self._devices:
+                    continue
+                if await self._send_tracked_led(
+                    ieee, slot_id, on_color if is_on else off_color
+                ):
+                    sent += 1
+        LOGGER.debug("LED tracking resync: %d LED update(s) sent", sent)
+        return sent
 
     def _update_device_registry_name(self, ieee: str, new_name: str) -> None:
         """Update the HA device registry when a device is renamed in Z2M."""
@@ -1758,7 +1869,11 @@ class Control4Manager:
         """Send c4_detect after a short delay to let Z2M finish device setup."""
         await asyncio.sleep(3)
         LOGGER.info("Auto-detecting device type for %s", ieee_address)
-        await self.async_send_mqtt(ieee_address, {"c4_detect": True})
+        if not await self.async_try_send_mqtt(
+            ieee_address, {"c4_detect": True}, "device type detection"
+        ):
+            # Let the next state payload from this device try again.
+            self._detect_sent.discard(ieee_address)
 
     def is_relay(self, ieee_address: str) -> bool:
         """Return whether a device can only switch its load, not dim it."""
@@ -1812,7 +1927,11 @@ class Control4Manager:
         """Read queued dimming tables one device at a time, to spare the mesh."""
         while self._dimming_queue:
             ieee = self._dimming_queue.popleft()
-            await self.async_send_mqtt(ieee, {"c4_read_dimming": True})
+            if not await self.async_try_send_mqtt(
+                ieee, {"c4_read_dimming": True}, "dimming table read"
+            ):
+                # Let the next state payload from this device queue it again.
+                self._dimming_requested.discard(ieee)
             await asyncio.sleep(DIMMING_READ_INTERVAL)
 
     async def async_set_dimming(
@@ -1822,6 +1941,46 @@ class Control4Manager:
         await self.async_send_mqtt(
             ieee_address, {"c4_cmd": f"c4.dm.tv 00 {param} {value:08x}"}
         )
+
+    async def _press_button_task(
+        self, ieee: str, slot_id: int, event_type: str
+    ) -> None:
+        """Run press_button from a fire-and-forget task; log a failed publish."""
+        try:
+            await self.press_button(ieee, slot_id, event_type)
+        except HomeAssistantError as err:
+            state = self._devices.get(ieee)
+            LOGGER.warning(
+                "Button action for %s slot %s (%s) failed: %s",
+                state.friendly_name if state else ieee,
+                slot_id,
+                event_type,
+                err,
+            )
+
+    async def async_try_send_mqtt(
+        self, ieee_address: str, payload: dict[str, Any], what: str
+    ) -> bool:
+        """
+        Send like async_send_mqtt, but log a failed publish instead of raising.
+
+        For fire-and-forget paths (LED tracking, detection, background
+        reads) where nothing awaits the result, so an exception would only
+        show up as an unretrieved task exception (issue #246). Returns
+        whether the publish succeeded.
+        """
+        try:
+            await self.async_send_mqtt(ieee_address, payload)
+        except HomeAssistantError as err:
+            state = self._devices.get(ieee_address)
+            LOGGER.warning(
+                "%s for %s not sent, MQTT publish failed: %s",
+                what[:1].upper() + what[1:],
+                state.friendly_name if state else ieee_address,
+                err,
+            )
+            return False
+        return True
 
     async def async_send_mqtt(self, ieee_address: str, payload: dict[str, Any]) -> None:
         """
