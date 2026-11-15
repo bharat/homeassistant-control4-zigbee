@@ -31,7 +31,8 @@ The two halves communicate ONLY over MQTT, via a frozen contract (see below). No
 │   ├── manager.py              # Brain: MQTT subs, device discovery, state, service routing
 │   ├── models.py               # SlotConfig / DeviceConfig / DeviceState dataclasses
 │   ├── store.py                # Persistent JSON in .storage/control4_dimmers_devices.<entry_id>
-│   ├── sensor.py               # Device anchor + ambient light (lux) sensors
+│   ├── sensor.py               # Device anchor, ambient light (lux) and load power sensors
+│   ├── number.py               # Dimming table settings (c4_tv_*), dimmable loads only
 │   ├── light.py                # Brightness 0-255 (proxies Z2M's standard light entity; NOT in PLATFORMS)
 │   ├── switch.py               # Plain on/off load entity for relay-only devices (switch type)
 │   ├── event.py                # One Control4ButtonEvent entity per button slot
@@ -94,7 +95,7 @@ This integration and the Zigbee-side definition are separate codebases coupled o
 
 - **The MQTT boundary is non-negotiable.** Protocol logic lives on the Zigbee side; nothing in `custom_components/` should know what hex bytes a C4 command uses (composing `c4.dmx.*` ASCII command strings is the ceiling).
 - **Manifest version is `"0.0.0"` on purpose.** HACS reads the version from git tags, not `manifest.json`. Don't bump it manually -- Releases section explains.
-- **`PLATFORMS = [Platform.EVENT, Platform.SENSOR, Platform.SWITCH]` only** -- the integration deliberately doesn't register a `light` platform; it reuses Z2M's native light entity via MQTT. Don't add `light.py` to `PLATFORMS`. The `switch` platform exists only for relay-only hardware (the `switch` device type, C4-SW120277, issue #189), where Z2M's light entity would show a brightness slider the hardware cannot honor.
+- **`PLATFORMS = [Platform.EVENT, Platform.NUMBER, Platform.SENSOR, Platform.SWITCH]` only** -- the integration deliberately doesn't register a `light` platform; it reuses Z2M's native light entity via MQTT. Don't add `light.py` to `PLATFORMS`. The `switch` platform exists only for relay-only hardware (the `switch` device type, C4-SW120277, issue #189), where Z2M's light entity would show a brightness slider the hardware cannot honor. The `number` platform holds the dimming table settings (`c4_tv_*`), created only where `Control4Manager.has_dimming_table()` is true (dimmers and keypad dimmers, never relays, keypads or the outlet).
 - **Per-device persistent state lives in `.storage/control4_dimmers_devices.<entry_id>`.** Schema changes require bumping `STORAGE_VERSION` in `const.py` and writing a migration in `store.py`.
 - **Pre-commit runs pytest with a 15s/test timeout.** Long-running tests should be marked `@pytest.mark.slow` or split.
 - **`scripts/led-*.json`** are hand-crafted protocol reverse-engineering artifacts, kept as the lab notebook behind RESEARCH.md. Not test data; don't run in CI.
