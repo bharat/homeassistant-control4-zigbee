@@ -219,6 +219,7 @@ def test_dimming_read_skipped_when_cached(
     manager: Control4Manager, dimmer_state: DeviceState
 ) -> None:
     """Values republished from Z2M's cache mean no Zigbee read is needed."""
+    _add(manager, dimmer_state)
     dimmer_state.update_from_mqtt({"c4_tv_01": 100})
     manager._maybe_read_dimming(dimmer_state)
     assert not manager._dimming_queue
