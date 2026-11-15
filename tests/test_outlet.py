@@ -96,7 +96,10 @@ class TestOutletEntities:
         mock_entry: MagicMock,
     ) -> None:
         await manager._handle_bridge_devices(_bridge_msg([_outlet_bridge_device()]))
-        mock_hass.data = {DOMAIN: {mock_entry.entry_id: {"manager": manager}}}
+        mock_hass.data = {
+            DOMAIN: {mock_entry.entry_id: {"manager": manager}},
+            er.DATA_REGISTRY: MagicMock(),  # for the orphan sweep (issue #247)
+        }
         added: list = []
         await event_async_setup_entry(mock_hass, mock_entry, added.extend)
         assert {e.unique_id for e in added} == {f"{IEEE_OUTLET}_event_1"}
