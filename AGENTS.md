@@ -25,7 +25,7 @@ The two halves communicate ONLY over MQTT, via a frozen contract (see below). No
 │
 ├── custom_components/control4_dimmers/
 │   ├── __init__.py             # async_setup_entry, services, WebSocket API
-│   ├── manifest.json           # version is "0.0.0" sentinel -- see Releases section
+│   ├── manifest.json           # version is "0.0.0" in source; releases stamp it -- see Releases section
 │   ├── config_flow.py          # Single-step user flow (asks for MQTT base topic)
 │   ├── const.py                # DOMAIN, DEVICE_TYPES, DEVICE_TYPE_SLOTS, BUTTON_EVENT_TYPES
 │   ├── manager.py              # Brain: MQTT subs, device discovery, state, service routing
@@ -94,7 +94,7 @@ This integration and the Zigbee-side definition are separate codebases coupled o
 ## Conventions and gotchas
 
 - **The MQTT boundary is non-negotiable.** Protocol logic lives on the Zigbee side; nothing in `custom_components/` should know what hex bytes a C4 command uses (composing `c4.dmx.*` ASCII command strings is the ceiling).
-- **Manifest version is `"0.0.0"` on purpose.** HACS reads the version from git tags, not `manifest.json`. Don't bump it manually -- Releases section explains.
+- **Manifest version is `"0.0.0"` in source on purpose.** The release workflow writes the real version into the HACS zip it builds. Don't bump it manually -- Releases section explains.
 - **`PLATFORMS = [Platform.EVENT, Platform.NUMBER, Platform.SENSOR, Platform.SWITCH]` only** -- the integration deliberately doesn't register a `light` platform; it reuses Z2M's native light entity via MQTT. Don't add `light.py` to `PLATFORMS`. The `switch` platform exists only for relay-only hardware (the `switch` device type, C4-SW120277, issue #189), where Z2M's light entity would show a brightness slider the hardware cannot honor. The `number` platform holds the dimming table settings (`c4_tv_*`), created only where `Control4Manager.has_dimming_table()` is true (dimmers and keypad dimmers, never relays, keypads or the outlet).
 - **Per-device persistent state lives in `.storage/control4_dimmers_devices.<entry_id>`.** Schema changes require bumping `STORAGE_VERSION` in `const.py` and writing a migration in `store.py`.
 - **Pre-commit runs pytest with a 15s/test timeout.** Long-running tests should be marked `@pytest.mark.slow` or split.
@@ -112,7 +112,7 @@ This integration and the Zigbee-side definition are separate codebases coupled o
 
 Tags use **CalVer**: `v<YYYY>.<M>.<DD>` (e.g. `v2026.5.13`). Release titles use `Control4 Zigbee v<YYYY>.<M>.<DD>`. Matches the fleet-wide HA-integration convention (triad-ams set the canonical shape).
 
-The release workflow (`.github/workflows/release.yml`) auto-creates the GitHub release on `v*` tag push. HACS reads the version from the git tag, not `manifest.json` -- so do not bump `manifest.json`'s `"0.0.0"`.
+The release workflow (`.github/workflows/release.yml`) auto-creates the GitHub release on `v*` tag push and attaches `control4_dimmers.zip`: the integration folder with the tag's version written into `manifest.json`. `hacs.json` sets `zip_release`, so HACS installs that zip and Home Assistant shows the real version. Keep `manifest.json` at `"0.0.0"` in source. To attach the zip to an existing release (without touching its notes), run the workflow by hand with that tag.
 
 Build the GitHub release body in three parts:
 
@@ -126,7 +126,7 @@ Reference example (sister project): https://github.com/bharat/homeassistant-lock
 
 ## What NOT to touch
 
-- `manifest.json`'s `"version"` field -- sentinel. HACS uses git tags.
+- `manifest.json`'s `"version"` field -- `"0.0.0"` sentinel; the release workflow stamps the zip.
 - `scripts/led-*.json` -- LED probe payloads. Hand-crafted manual-debugging artifacts, not test data.
 - The frozen MQTT contract names (above) -- the Zigbee-side fork and every deployed automation depend on them.
 - `.cursor/rules/` -- IDE rules; harmless but not part of the runtime.
