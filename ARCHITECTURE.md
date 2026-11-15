@@ -98,7 +98,7 @@ MQTT topics and manages HA entities.
 | `store.py` | Persistent storage (`.storage/`) for device configs |
 | `models.py` | Data models: `DeviceConfig`, `DeviceState`, `SlotConfig` |
 | `sensor.py` | Sensor anchor entity (device representation), ambient light, load power sensors |
-| `number.py` | Dimming table settings (`c4_tv_<param>`), not created for relay switches |
+| `number.py` | Dimming table settings (`c4_tv_<param>`), only for dimmable loads (not relays, keypads or the outlet) |
 | `light.py` | Dimmer load entity |
 | `event.py` | Button event entities (with LED config as attributes) |
 | `__init__.py` | Platform setup, websocket API, service registration |
@@ -156,7 +156,7 @@ HA Device: "Kitchen Dimmer"
       (9 total, CONFIG category, disabled by default)
 ```
 
-Load sensors are created the first time a device publishes `c4_load_power`. Dimming numbers are created for every load device that isn't a relay; on first sight the manager sends `c4_read_dimming` (spaced 5 s apart across devices) unless Z2M already has `c4_tv_*` cached. A write sends `c4_cmd` `c4.dm.tv 00 <param> <value>`, and the converter reads that param back and publishes the new `c4_tv_<param>`.
+Load sensors are created the first time a device publishes `c4_load_power`. Dimming numbers are created only for a load-bearing type (dimmer or keypad dimmer) that isn't a relay, so keypads, the outlet and relay switches get none even if a raw `c4.dm.tv` command makes the converter publish `c4_tv_*` for them; on first sight the manager sends `c4_read_dimming` (spaced 5 s apart across devices) unless Z2M already has `c4_tv_*` cached. A write sends `c4_cmd` `c4.dm.tv 00 <param> <value>`, and the converter reads that param back and publishes the new `c4_tv_<param>`.
 
 ### Relay-only switch (e.g., Z2M name "Bath Fan", C4-SW120277)
 

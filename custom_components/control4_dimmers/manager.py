@@ -40,8 +40,8 @@ from .const import (
     DEVICE_TYPE_SLOTS,
     DEVICE_TYPE_SWITCH,
     DEVICE_TYPES,
-    DEVICE_TYPES_WITH_LOAD,
     DOMAIN,
+    LOAD_BEARING_TYPES,
     LOGGER,
     OUTLET_MODELS,
     RELAY_MODELS,
@@ -1767,9 +1767,25 @@ class Control4Manager:
             return False
         if device.raw.get("c4_model") in RELAY_MODELS:
             return True
-        config = self._store.get_device(ieee_address)
-        effective = (config.effective_type if config else None) or device.device_type
-        return effective == DEVICE_TYPE_SWITCH
+        return self._effective_type(device) == DEVICE_TYPE_SWITCH
+
+    def has_dimming_table(self, ieee_address: str) -> bool:
+        """
+        Return whether a device drives a dimmable load with a dimming table.
+
+        Keypads and the outlet have no dimmable load, and a relay only
+        switches its load, so the table means nothing on any of them.
+        """
+        device = self._devices.get(ieee_address)
+        if device is None:
+            return False
+        load_bearing = self._effective_type(device) in LOAD_BEARING_TYPES
+        return load_bearing and not self.is_relay(ieee_address)
+
+    def _effective_type(self, device: DeviceState) -> str | None:
+        """Return a device's stored type override, else its detected type."""
+        config = self._store.get_device(device.ieee_address)
+        return (config.effective_type if config else None) or device.device_type
 
     def _maybe_read_dimming(self, device: DeviceState) -> None:
         """
@@ -1780,8 +1796,7 @@ class Control4Manager:
         """
         ieee = device.ieee_address
         if (
-            device.device_type not in DEVICE_TYPES_WITH_LOAD
-            or self.is_relay(ieee)
+            not self.has_dimming_table(ieee)
             or ieee in self._dimming_requested
             or any(key.startswith("c4_tv_") for key in device.raw)
         ):

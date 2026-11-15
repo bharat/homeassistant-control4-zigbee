@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import pytest
 from homeassistant.components.sensor import SensorExtraStoredData
 from homeassistant.helpers import entity_registry as er
 
@@ -155,6 +156,30 @@ async def test_relay_model_gets_no_numbers_despite_type(
     assert await _setup(manager, number_async_setup_entry) == []
 
 
+@pytest.mark.parametrize("device_type", ["outlet", "keypad"])
+async def test_no_numbers_without_dimmable_load(
+    manager: Control4Manager, dimmer_state: DeviceState, device_type: str
+) -> None:
+    """A c4_tv_* value from a raw command makes no numbers without a load to dim."""
+    dimmer_state.device_type = device_type
+    _add(manager, dimmer_state)
+    dimmer_state.update_from_mqtt({f"c4_tv_{d.key}": 0 for d in DIMMING_NUMBERS})
+
+    assert await _setup(manager, number_async_setup_entry) == []
+
+
+def test_outlet_dimming_table_not_read(
+    manager: Control4Manager, dimmer_state: DeviceState
+) -> None:
+    """The outlet has no dimming table, so none is read."""
+    dimmer_state.device_type = "outlet"
+    _add(manager, dimmer_state)
+
+    manager._maybe_read_dimming(dimmer_state)
+
+    assert not manager._dimming_queue
+
+
 def test_relay_dimming_table_not_read(
     manager: Control4Manager, dimmer_state: DeviceState
 ) -> None:
@@ -175,6 +200,8 @@ def test_dimming_read_requested_once_for_load_devices(
     """Only a load device with no known values is queued, and only once."""
     assert dimmer_state.ieee_address == IEEE_DIMMER
     assert keypad_state.ieee_address == IEEE_KEYPAD
+    _add(manager, dimmer_state)
+    _add(manager, keypad_state)
     manager._hass.async_create_background_task = MagicMock(
         side_effect=lambda coro, _name: coro.close()
     )

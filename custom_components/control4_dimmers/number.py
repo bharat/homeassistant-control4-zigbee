@@ -92,8 +92,9 @@ async def async_setup_entry(
     def _check_new_numbers() -> None:
         new: list[Control4DimmingNumber] = []
         for ieee, state in manager.devices.items():
-            # A relay only switches its load, so these settings mean nothing.
-            if manager.is_relay(ieee):
+            # Keypads, the outlet and relays have no dimmable load, so a
+            # c4_tv_* value from a raw command must not make entities there.
+            if not manager.has_dimming_table(ieee):
                 continue
             for description in DIMMING_NUMBERS:
                 key = (ieee, description.key)
