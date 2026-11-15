@@ -280,6 +280,12 @@ no brightness slider. If one of yours was previously exposed as a light,
 the light entity is gone and the switch entity replaces it; update any
 automations or dashboards that referenced the old entity id.
 
+If a device's type changes (for example a keypad dimmer that was detected
+as a dimmer before Zigbee2MQTT knew its model), button entities it no
+longer has are removed, but the ones it keeps keep their existing entity
+ids, such as `event.<ieee>_button_2` rather than `event.<ieee>_top`. They
+keep working; rename them in Home Assistant if you want the new names.
+
 ### Paddle events and 3-way auxiliary switches
 
 Each load-bearing device gets two event entities, **Paddle Up** and **Paddle Down**, which fire with the same event types as the buttons. They stay `unknown` if nothing reports on them. They need a Zigbee2MQTT image whose converter reports these presses as `paddle_up` / `paddle_down`; older converters report them as `button_8` / `button_9`, which the integration ignores.

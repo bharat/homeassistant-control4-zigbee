@@ -1,5 +1,7 @@
 {
     "name": "Control4 Zigbee",
     "content_in_root": false,
-    "homeassistant": "2026.3.1"
+    "homeassistant": "2026.3.1",
+    "zip_release": true,
+    "filename": "control4_dimmers.zip"
 }

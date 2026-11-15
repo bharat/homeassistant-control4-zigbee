@@ -7,10 +7,13 @@ on:
   push:
     tags:
       - 'v*'
+  # Rebuild and re-attach the HACS zip for an existing release (for example a
+  # release published before zip releases existed). The release itself and its
+  # notes are left untouched.
   workflow_dispatch:
     inputs:
       tag:
-        description: 'Tag to release (e.g., v2025.9.13)'
+        description: 'Existing tag to (re)attach the zip to (e.g., v2026.11.15)'
         required: true
 
 jobs:
@@ -18,22 +21,44 @@ jobs:
     name: Create GitHub Release
     runs-on: ubuntu-latest
     steps:
+      - name: Determine tag
+        id: vars
+        env:
+          INPUT_TAG: ${{ github.event.inputs.tag }}
+        run: |
+          TAG="${INPUT_TAG:-$GITHUB_REF_NAME}"
+          VERSION="${TAG#v}"
+          if ! [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(\.[0-9]+)?$ ]]; then
+            echo "Tag $TAG is not a vYYYY.M.D[.N] version" >&2
+            exit 1
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
+          ref: ${{ steps.vars.outputs.tag }}
           fetch-depth: 0
 
-      - name: Determine tag
-        id: vars
+      # HACS installs this zip (hacs.json: zip_release). The source tree keeps
+      # manifest.json at "0.0.0"; the zip gets the release's real version so
+      # Home Assistant's integration page shows it.
+      - name: Build HACS zip
+        env:
+          VERSION: ${{ steps.vars.outputs.version }}
         run: |
-          if [ -n "${{ github.event.inputs.tag }}" ]; then
-            TAG="${{ github.event.inputs.tag }}"
-          else
-            TAG="${GITHUB_REF_NAME}"
-          fi
-          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          set -euo pipefail
+          src=custom_components/control4_dimmers
+          jq --arg v "$VERSION" '.version = $v' "$src/manifest.json" > manifest.tmp
+          mv manifest.tmp "$src/manifest.json"
+          mkdir -p dist
+          (cd "$src" && zip -r -q "$GITHUB_WORKSPACE/dist/control4_dimmers.zip" . -x '__pycache__/*' '*/__pycache__/*' '*.pyc')
+          unzip -p dist/control4_dimmers.zip manifest.json | jq -e --arg v "$VERSION" '.version == $v'
+          unzip -l dist/control4_dimmers.zip
 
       - name: Create Release
+        if: github.event_name == 'push'
         uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64  # v3.0.3
         with:
           tag_name: ${{ steps.vars.outputs.tag }}
@@ -41,3 +66,9 @@ jobs:
           generate_release_notes: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Attach HACS zip
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.vars.outputs.tag }}
+        run: gh release upload "$TAG" dist/control4_dimmers.zip --clobber
