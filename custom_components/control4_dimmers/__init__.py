@@ -96,6 +96,18 @@ _SLOT_SCHEMA = vol.Schema(
 )
 
 
+# Loose per-slot schema for the Lovelace card's websocket path. The card
+# owns the rest of the slot shape; this only guarantees that the two
+# colors spliced into c4.dmx.led commands are six-digit hex.
+_SLOT_COLOR_SCHEMA = vol.Schema(
+    {
+        vol.Optional("led_on_color"): _hex_color,
+        vol.Optional("led_off_color"): _hex_color,
+    },
+    extra=vol.ALLOW_EXTRA,
+)
+
+
 def _validate_slot(raw: dict[str, Any]) -> dict[str, Any]:
     """Validate one slot dict, raising ServiceValidationError on bad input."""
     try:
@@ -215,7 +227,7 @@ async def _ws_get_devices(
         vol.Required("type"): f"{DOMAIN}/device_config",
         vol.Required("ieee_address"): cv.string,
         vol.Optional("device_type_override"): vol.Any(cv.string, None),
-        vol.Optional("slots"): list,
+        vol.Optional("slots"): [_SLOT_COLOR_SCHEMA],
         vol.Optional("faceplate_color"): vol.Any(cv.string, None),
         vol.Optional("backlight_color"): vol.Any(_hex_color, None),
     }
@@ -347,7 +359,8 @@ async def _svc_set_led(hass: HomeAssistant, call: ServiceCall) -> None:
     """Handle control4_dimmers.set_led service call."""
     entity_id = call.data["entity_id"]
     mode = call.data["mode"]
-    color = call.data["color"].lstrip("#")
+    # Schema-validated six-digit hex; this is spliced into a c4_cmd below.
+    color = _hex_color(call.data["color"])
 
     state = hass.states.get(entity_id)
     if state is None:
@@ -490,10 +503,12 @@ async def _svc_set_slot_led(hass: HomeAssistant, call: ServiceCall) -> None:
 
     if "led_mode" in call.data:
         slot.led_mode = call.data["led_mode"]
+    # Schema-validated six-digit hex; re-run the validator so direct
+    # callers of this handler get the same guarantee as service calls.
     if "on_color" in call.data:
-        slot.led_on_color = call.data["on_color"].lstrip("#")
+        slot.led_on_color = _hex_color(call.data["on_color"])
     if "off_color" in call.data:
-        slot.led_off_color = call.data["off_color"].lstrip("#")
+        slot.led_off_color = _hex_color(call.data["off_color"])
 
     await manager.store.async_save_device(config)
 
@@ -831,7 +846,7 @@ async def _register_services(hass: HomeAssistant) -> None:
             {
                 vol.Required("entity_id"): cv.string,
                 vol.Required("mode"): vol.In(["on", "off"]),
-                vol.Required("color"): cv.string,
+                vol.Required("color"): _hex_color,
             }
         ),
     )
@@ -873,8 +888,8 @@ async def _register_services(hass: HomeAssistant) -> None:
                 vol.Optional("led_mode"): vol.In(
                     ["fixed", "follow_load", "push_release"]
                 ),
-                vol.Optional("on_color"): cv.string,
-                vol.Optional("off_color"): cv.string,
+                vol.Optional("on_color"): _hex_color,
+                vol.Optional("off_color"): _hex_color,
             }
         ),
     )
@@ -926,8 +941,8 @@ async def _register_services(hass: HomeAssistant) -> None:
                 vol.Optional("name"): cv.string,
                 vol.Optional("behavior"): cv.string,
                 vol.Optional("led_mode"): cv.string,
-                vol.Optional("led_on_color"): cv.string,
-                vol.Optional("led_off_color"): cv.string,
+                vol.Optional("led_on_color"): _hex_color,
+                vol.Optional("led_off_color"): _hex_color,
                 vol.Optional("tap_action"): vol.Any(None, dict, cv.string),
                 vol.Optional("double_tap_action"): vol.Any(None, dict, cv.string),
                 vol.Optional("hold_action"): vol.Any(None, dict, cv.string),

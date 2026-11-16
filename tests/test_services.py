@@ -289,6 +289,89 @@ class TestDeviceTypeSchemas:
             schema({"ieee_address": IEEE, "device_type_override": "relay"})
 
 
+# ── LED color validation ─────────────────────────────────────────────
+
+# Values that would smuggle extra bytes or a second command into the
+# c4_cmd string that set_led / set_slot_led compose.
+BAD_COLORS = [
+    "ff0000 05 000000",
+    "ff0000\nc4.dmx.led 00 05 000000",
+    "c4.dmx.led 00 05 ff0000",
+    "c4.",
+    "ff00",
+    "ff00000",
+    "gg0000",
+    "",
+    123,
+]
+
+
+class TestLedColorSchemas:
+    """set_led and set_slot_led only accept six-digit hex colors."""
+
+    @staticmethod
+    def _schema(mock_hass: MagicMock, service: str) -> vol.Schema:
+        return TestDeviceTypeSchemas._schema(mock_hass, service)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("color", BAD_COLORS)
+    async def test_set_led_rejects_non_hex(
+        self, mock_hass: MagicMock, color: Any
+    ) -> None:
+        await _register_services(mock_hass)
+        schema = self._schema(mock_hass, "set_led")
+        with pytest.raises(vol.Invalid):
+            schema({"entity_id": "event.k_1", "mode": "on", "color": color})
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("field", ["on_color", "off_color"])
+    @pytest.mark.parametrize("color", BAD_COLORS)
+    async def test_set_slot_led_rejects_non_hex(
+        self, mock_hass: MagicMock, field: str, color: Any
+    ) -> None:
+        await _register_services(mock_hass)
+        schema = self._schema(mock_hass, "set_slot_led")
+        with pytest.raises(vol.Invalid):
+            schema({"entity_id": "event.k_1", field: color})
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("field", ["led_on_color", "led_off_color"])
+    @pytest.mark.parametrize("color", BAD_COLORS)
+    async def test_set_slot_rejects_non_hex(
+        self, mock_hass: MagicMock, field: str, color: Any
+    ) -> None:
+        await _register_services(mock_hass)
+        schema = self._schema(mock_hass, "set_slot")
+        with pytest.raises(vol.Invalid):
+            schema({"ieee_address": IEEE, "slot_id": 1, field: color})
+
+    @pytest.mark.asyncio
+    async def test_set_led_accepts_and_normalizes_hex(
+        self, mock_hass: MagicMock
+    ) -> None:
+        await _register_services(mock_hass)
+        schema = self._schema(mock_hass, "set_led")
+        data = schema({"entity_id": "event.k_1", "mode": "on", "color": "#FF0000"})
+        assert data["color"] == "ff0000"
+        data = schema({"entity_id": "event.k_1", "mode": "off", "color": "00ff00"})
+        assert data["color"] == "00ff00"
+
+    @pytest.mark.asyncio
+    async def test_set_slot_led_accepts_and_normalizes_hex(
+        self, mock_hass: MagicMock
+    ) -> None:
+        await _register_services(mock_hass)
+        schema = self._schema(mock_hass, "set_slot_led")
+        data = schema(
+            {"entity_id": "event.k_1", "on_color": "#00FF00", "off_color": "FF0000"}
+        )
+        assert data["on_color"] == "00ff00"
+        assert data["off_color"] == "ff0000"
+        # Colors stay optional: mode-only calls still validate.
+        data = schema({"entity_id": "event.k_1", "led_mode": "fixed"})
+        assert "on_color" not in data
+
+
 # ── set_slot ─────────────────────────────────────────────────────────
 
 

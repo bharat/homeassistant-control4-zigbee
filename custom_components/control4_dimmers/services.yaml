@@ -423,13 +423,13 @@ set_slot_led:
             - push_release
     on_color:
       name: On / Press / Load-On Color
-      description: Hex RGB (e.g. "#ff0000" or "ff0000").
+      description: Six-digit hex RGB (e.g. "#ff0000" or "ff0000"); anything else is rejected.
       required: false
       selector:
         text:
     off_color:
       name: Off / Release / Load-Off Color
-      description: Hex RGB (e.g. "#000000" or "000000").
+      description: Six-digit hex RGB (e.g. "#000000" or "000000"); anything else is rejected.
       required: false
       selector:
         text:
@@ -456,7 +456,7 @@ set_led:
             - "off"
     color:
       name: Color
-      description: Hex RGB color (e.g. "#ff0000").
+      description: Six-digit hex RGB color (e.g. "#ff0000" or "ff0000"); anything else is rejected.
       required: true
       selector:
         text:
