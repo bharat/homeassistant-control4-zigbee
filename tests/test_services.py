@@ -264,7 +264,9 @@ class TestDeviceTypeSchemas:
     def _schema(mock_hass: MagicMock, service: str) -> vol.Schema:
         for call in mock_hass.services.async_register.call_args_list:
             if call.args[1] == service:
-                return call.kwargs["schema"]
+                # async_register_admin_service passes the schema
+                # positionally; plain registrations pass it by keyword.
+                return call.args[3] if len(call.args) > 3 else call.kwargs["schema"]
         msg = f"service {service} not registered"
         raise AssertionError(msg)
 

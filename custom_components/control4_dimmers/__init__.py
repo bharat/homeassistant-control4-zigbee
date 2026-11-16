@@ -11,6 +11,7 @@ from homeassistant.const import EVENT_HOMEASSISTANT_STARTED, Platform
 from homeassistant.core import CoreState, Event, ServiceCall, SupportsResponse
 from homeassistant.exceptions import ServiceValidationError
 from homeassistant.helpers import config_validation as cv
+from homeassistant.helpers.service import async_register_admin_service
 
 from .const import (
     AUDIT_MODES,
@@ -219,6 +220,7 @@ async def _ws_get_devices(
         vol.Optional("backlight_color"): vol.Any(_hex_color, None),
     }
 )
+@websocket_api.require_admin
 @websocket_api.async_response
 async def _ws_configure_device(
     hass: HomeAssistant,
@@ -249,6 +251,7 @@ async def _ws_configure_device(
         vol.Required("payload"): dict,
     }
 )
+@websocket_api.require_admin
 @websocket_api.async_response
 async def _ws_send_mqtt(
     hass: HomeAssistant,
@@ -847,7 +850,8 @@ async def _register_services(hass: HomeAssistant) -> None:
         ),
     )
 
-    hass.services.async_register(
+    async_register_admin_service(
+        hass,
         DOMAIN,
         "send_raw_command",
         _wrap_send_raw_command,
@@ -875,7 +879,8 @@ async def _register_services(hass: HomeAssistant) -> None:
         ),
     )
 
-    hass.services.async_register(
+    async_register_admin_service(
+        hass,
         DOMAIN,
         "set_device_type",
         _wrap_set_device_type,
@@ -887,7 +892,8 @@ async def _register_services(hass: HomeAssistant) -> None:
         ),
     )
 
-    hass.services.async_register(
+    async_register_admin_service(
+        hass,
         DOMAIN,
         "set_device_config",
         _wrap_set_device_config,
@@ -906,7 +912,8 @@ async def _register_services(hass: HomeAssistant) -> None:
         supports_response=SupportsResponse.OPTIONAL,
     )
 
-    hass.services.async_register(
+    async_register_admin_service(
+        hass,
         DOMAIN,
         "set_slot",
         _wrap_set_slot,
@@ -957,7 +964,8 @@ async def _register_services(hass: HomeAssistant) -> None:
         supports_response=SupportsResponse.OPTIONAL,
     )
 
-    hass.services.async_register(
+    async_register_admin_service(
+        hass,
         DOMAIN,
         "snapshot",
         _wrap_snapshot,
@@ -971,7 +979,8 @@ async def _register_services(hass: HomeAssistant) -> None:
         supports_response=SupportsResponse.OPTIONAL,
     )
 
-    hass.services.async_register(
+    async_register_admin_service(
+        hass,
         DOMAIN,
         "restore",
         _wrap_restore,
@@ -999,7 +1008,8 @@ async def _register_services(hass: HomeAssistant) -> None:
         supports_response=SupportsResponse.OPTIONAL,
     )
 
-    hass.services.async_register(
+    async_register_admin_service(
+        hass,
         DOMAIN,
         "delete_snapshot",
         _wrap_delete_snapshot,
