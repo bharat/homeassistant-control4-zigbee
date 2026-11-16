@@ -342,10 +342,11 @@ class TestPruneOnRemoval:
         assert IEEE_A in mgr._push_locks
         assert IEEE_A in mgr._next_send_at
 
-        # bridge/devices with an empty list means the device is gone.
+        # Missing from two device lists in a row means the device is gone.
         msg = MagicMock()
         msg.topic = "zigbee2mqtt/bridge/devices"
         msg.payload = json.dumps([])
+        await mgr._handle_bridge_devices(msg)
         await mgr._handle_bridge_devices(msg)
 
         assert IEEE_A not in mgr._devices

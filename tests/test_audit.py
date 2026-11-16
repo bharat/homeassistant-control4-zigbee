@@ -902,6 +902,8 @@ class TestAuditPass:
         msg = MagicMock()
         msg.topic = "zigbee2mqtt/bridge/devices"
         msg.payload = json.dumps([])
+        # Missing from two lists in a row: the device is gone.
+        await mgr._handle_bridge_devices(msg)
         await mgr._handle_bridge_devices(msg)
         assert IEEE_A not in mgr._audit_attempts
         assert IEEE_A not in mgr._audit_summaries

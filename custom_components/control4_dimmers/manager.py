@@ -49,7 +49,13 @@ from .const import (
     RELAY_MODELS,
     SLOT_COUNT,
 )
-from .models import DeviceConfig, DeviceState, SlotConfig, _extract_color
+from .models import (
+    DeviceConfig,
+    DeviceState,
+    SlotConfig,
+    _extract_color,
+    sanitize_payload,
+)
 from .store import Control4Store  # noqa: TC001
 
 if TYPE_CHECKING:
@@ -102,6 +108,34 @@ VERIFY_TIMEOUT_MS = 5000
 # two still gets exactly one "pressed" per tap.
 PRESS_PAIR_WINDOW = 2.0
 
+# Inbound MQTT is untrusted: any client that can publish to the broker can
+# write a device's state topic or the bridge/devices list. These bound what
+# such a publisher can make the integration do.
+#
+# Software-run button actions per (ieee, slot) within ACTION_RATE_WINDOW
+# seconds. A burst beyond this (a replayed or flooded action topic) is
+# dropped instead of starting one service call per message.
+ACTION_RATE_LIMIT = 4
+ACTION_RATE_WINDOW = 1.0
+# State payloads buffered for devices not yet in a device list. Buffering
+# stops for good once the first list arrives.
+PENDING_STATES_MAX = 64
+# A device is dropped only after it is missing from this many consecutive
+# bridge/devices lists, so one forged or truncated list cannot remove every
+# device at once.
+MISSING_LISTS_TO_DROP = 2
+
+_IEEE_RE = re.compile(r"0x[0-9a-f]{16}")
+_FRIENDLY_NAME_MAX = 128
+# Anchored button grammar from the frozen MQTT contract. Click counts above
+# 4 still arrive from the converter (issue #178) and are clamped later.
+_BUTTON_PRESS_RE = re.compile(r"button_([1-6])_(press|scene)")
+_BUTTON_RELEASE_RE = re.compile(r"button_([1-6])_release")
+_BUTTON_CLICK_RE = re.compile(r"button_([1-6])_click_([1-9][0-9]?)")
+_PADDLE_RE = re.compile(
+    r"(paddle_up|paddle_down)_(?:(press|scene|release)|click_([1-9][0-9]?))"
+)
+
 # Z2M model strings that identify C4 devices
 C4_MODEL_IDS = {
     "C4-APD120",
@@ -131,6 +165,13 @@ class Control4Manager:
         self._subscriptions: list[Callable[[], None]] = []
         self._listeners: list[Callable[[], None]] = []
         self._pending_states: dict[str, dict] = {}  # buffered state payloads
+        # True once the first bridge/devices list has been processed; after
+        # that, state for unknown names is dropped instead of buffered.
+        self._device_list_seen = False
+        # ieee -> consecutive device lists the device was missing from.
+        self._missing_lists: dict[str, int] = {}
+        # (ieee, slot) -> monotonic times of recent software-run actions.
+        self._action_times: dict[tuple[str, int | str], deque[float]] = {}
         self._detect_sent: set[str] = set()  # IEEEs we've already sent c4_detect to
         # (ieee, slot_id | paddle_id) -> callback(event_type, context)
         self._event_callbacks: dict[
@@ -238,9 +279,18 @@ class Control4Manager:
         return lambda: self._listeners.remove(callback)
 
     def notify_listeners(self) -> None:
-        """Notify all registered listeners of a state change."""
-        for callback in self._listeners:
-            callback()
+        """
+        Notify all registered listeners of a state change.
+
+        Each listener runs on its own: one entity that raises (say, a
+        sensor handed a value Home Assistant rejects) must not stop every
+        entity after it from updating.
+        """
+        for callback in list(self._listeners):
+            try:
+                callback()
+            except Exception:  # noqa: BLE001
+                LOGGER.exception("Control4 state listener %r failed", callback)
 
     def register_event_callback(
         self,
@@ -270,10 +320,7 @@ class Control4Manager:
         load directly, so we only surface the event for automations; there is
         no software action to run. Returns True if the action was a paddle.
         """
-        paddle_match = re.match(
-            r"(paddle_up|paddle_down)_(?:(press|scene|release)|click_(\d+))$",
-            action_str,
-        )
+        paddle_match = _PADDLE_RE.fullmatch(action_str)
         if not paddle_match:
             return False
         paddle_id = paddle_match.group(1)
@@ -306,9 +353,45 @@ class Control4Manager:
         self._press_pairs[key] = (verb, now)
         self.fire_button_event(ieee, slot_id, "pressed", context)
 
-    def _dispatch_button_action(self, device: DeviceState, action_str: str) -> None:
+    def _slot_exists(self, device: DeviceState, slot_id: int) -> bool:
+        """Return whether a slot belongs to the device's type (True if untyped)."""
+        allowed = DEVICE_TYPE_SLOTS.get(self._effective_type(device) or "")
+        return allowed is None or slot_id in allowed
+
+    def _allow_action(self, ieee: str, slot_id: int | str) -> bool:
+        """Rate-limit software-run actions per (ieee, slot)."""
+        key = (ieee, slot_id)
+        now = time.monotonic()
+        times = self._action_times.setdefault(key, deque())
+        while times and now - times[0] >= ACTION_RATE_WINDOW:
+            times.popleft()
+        if len(times) >= ACTION_RATE_LIMIT:
+            return False
+        times.append(now)
+        return True
+
+    def _schedule_action(
+        self, ieee: str, slot_id: int, event_type: str, context: Context
+    ) -> None:
+        """Run a slot's software action in a task, subject to the rate limit."""
+        if not self._allow_action(ieee, slot_id):
+            LOGGER.debug(
+                "Dropping %s action for %s slot %s: rate limit reached",
+                event_type,
+                ieee,
+                slot_id,
+            )
+            return
+        self._hass.async_create_task(
+            self._press_button_task(ieee, slot_id, event_type, context),
+            f"c4_action_{ieee}_{slot_id}",
+        )
+
+    def _dispatch_button_action(  # noqa: PLR0911, PLR0912
+        self, device: DeviceState, action_str: str
+    ) -> None:
         """Parse an action string from Z2M and dispatch to event entities."""
-        if not action_str:
+        if not action_str or not isinstance(action_str, str):
             return
 
         if self._dispatch_paddle_action(device, action_str):
@@ -320,9 +403,11 @@ class Control4Manager:
         context = Context()
 
         # Press or scene: button_N_press (c4.dmx.bp), button_N_scene (c4.dmx.sc)
-        press_match = re.match(r"button_(\d+)_(press|scene)", action_str)
+        press_match = _BUTTON_PRESS_RE.fullmatch(action_str)
         if press_match:
             slot_id = self._button_slot(device, int(press_match.group(1)))
+            if not self._slot_exists(device, slot_id):
+                return
             is_scene = press_match.group(2) == "scene"
             self._fire_pressed(
                 device.ieee_address, slot_id, press_match.group(2), context
@@ -347,25 +432,24 @@ class Control4Manager:
                 and not is_scene
                 and (not slot or not slot.double_tap_action)
             ):
-                self._hass.async_create_task(
-                    self._press_button_task(
-                        device.ieee_address, slot_id, "pressed", context
-                    ),
-                    f"c4_action_{device.ieee_address}_{slot_id}",
-                )
+                self._schedule_action(device.ieee_address, slot_id, "pressed", context)
             return
 
         # button_N_release  (from c4.dmx.br)
-        release_match = re.match(r"button_(\d+)_release", action_str)
+        release_match = _BUTTON_RELEASE_RE.fullmatch(action_str)
         if release_match:
             slot_id = self._button_slot(device, int(release_match.group(1)))
+            if not self._slot_exists(device, slot_id):
+                return
             self.fire_button_event(device.ieee_address, slot_id, "released", context)
             return
 
         # button_N_click_C  (from c4.dmx.cc)
-        click_match = re.match(r"button_(\d+)_click_(\d+)", action_str)
+        click_match = _BUTTON_CLICK_RE.fullmatch(action_str)
         if click_match:
             slot_id = self._button_slot(device, int(click_match.group(1)))
+            if not self._slot_exists(device, slot_id):
+                return
             count = int(click_match.group(2))
             event_type = _click_count_to_event_type(count)
             self.fire_button_event(device.ieee_address, slot_id, event_type, context)
@@ -378,18 +462,12 @@ class Control4Manager:
             if count == 1:
                 # Only fires when double_tap is configured (debounced)
                 if slot and slot.double_tap_action:
-                    self._hass.async_create_task(
-                        self._press_button_task(
-                            device.ieee_address, slot_id, "single_tap", context
-                        ),
-                        f"c4_action_{device.ieee_address}_{slot_id}",
+                    self._schedule_action(
+                        device.ieee_address, slot_id, "single_tap", context
                     )
             elif count == 2:  # noqa: PLR2004
-                self._hass.async_create_task(
-                    self._press_button_task(
-                        device.ieee_address, slot_id, "double_tap", context
-                    ),
-                    f"c4_action_{device.ieee_address}_{slot_id}",
+                self._schedule_action(
+                    device.ieee_address, slot_id, "double_tap", context
                 )
             return
 
@@ -485,10 +563,16 @@ class Control4Manager:
             unsub()
         self._light_track_unsubs.clear()
 
-    async def _handle_bridge_devices(  # noqa: PLR0912
-        self, msg: mqtt.ReceiveMessage
-    ) -> None:
-        """Handle zigbee2mqtt/bridge/devices message to discover C4 devices."""
+    async def _handle_bridge_devices(self, msg: mqtt.ReceiveMessage) -> None:
+        """
+        Handle zigbee2mqtt/bridge/devices message to discover C4 devices.
+
+        The list is untrusted input. Entries need a well-formed IEEE
+        address and a plain friendly name, a name already held by another
+        device is refused (so a forged list cannot swap two devices'
+        names and redirect their traffic), and a device is only dropped
+        after it is missing from MISSING_LISTS_TO_DROP lists in a row.
+        """
         payload = msg.payload
         if isinstance(payload, bytes):
             payload = payload.decode(errors="replace")
@@ -501,77 +585,135 @@ class Control4Manager:
         if not isinstance(payload, list):
             return
 
-        seen = set()
+        seen: set[str] = set()
+        claimed: dict[str, str] = {}  # friendly name -> ieee, this list
         for device_info in payload:
             if not isinstance(device_info, dict):
                 continue
             if not _is_control4_device(device_info):
                 continue
+            ieee = self._accept_device_entry(device_info, claimed)
+            if ieee is not None:
+                seen.add(ieee)
 
-            ieee = device_info.get("ieee_address", "")
-            if not ieee:
-                continue
-            seen.add(ieee)
-            friendly_name = device_info.get("friendly_name", ieee)
-            # Some devices prefix their Zigbee modelID (the ROS reports
-            # "c4:control4_light:C4-V-ROSW120"); keep only the model.
-            model_id = device_info.get("model_id", "").rsplit(":", 1)[-1]
-
-            if ieee not in self._devices:
-                self._devices[ieee] = DeviceState(
-                    ieee_address=ieee,
-                    friendly_name=friendly_name,
-                    model_id=model_id,
-                )
-                LOGGER.info(
-                    "Discovered Control4 device: %s (%s) model=%s",
-                    friendly_name,
-                    ieee,
-                    model_id,
-                )
-            else:
-                dev = self._devices[ieee]
-                if dev.friendly_name != friendly_name:
-                    LOGGER.info(
-                        "Device renamed: %s -> %s (%s)",
-                        dev.friendly_name,
-                        friendly_name,
-                        ieee,
-                    )
-                    dev.friendly_name = friendly_name
-                    self._update_device_registry_name(ieee, friendly_name)
-                dev.model_id = model_id
-            # The outlet relay has no c4.dmx.dim answer, so its type comes
-            # from the model. Setting it also keeps c4_detect from being
-            # sent to a device whose converter can't take it.
-            if _is_outlet(device_info):
-                self._devices[ieee].device_type = DEVICE_TYPE_OUTLET
-
-        removed = set(self._devices.keys()) - seen
-        for ieee in removed:
-            LOGGER.info("Control4 device removed: %s", ieee)
-            del self._devices[ieee]
-            self._prune_device_state(ieee)
-
-        # Apply any state payloads that arrived before discovery.
-        if self._pending_states:
-            applied = []
-            for name, payload in self._pending_states.items():
-                device = self._find_device_by_name(name)
-                if device is not None:
-                    device.update_from_mqtt(payload)
-                    self._maybe_auto_detect(device)
-                    applied.append(name)
-            for name in applied:
-                del self._pending_states[name]
-            if applied:
-                LOGGER.debug(
-                    "Applied %d buffered state payloads after discovery",
-                    len(applied),
-                )
-
+        self._drop_missing_devices(seen)
+        self._device_list_seen = True
+        self._replay_pending_states()
         self.setup_light_tracking()
         self.notify_listeners()
+
+    def _accept_device_entry(
+        self, device_info: dict[str, Any], claimed: dict[str, str]
+    ) -> str | None:
+        """
+        Apply one Control4 entry of a device list.
+
+        Returns the IEEE if the device is (still) known afterwards, so the
+        caller counts it as present, or None if the entry was refused.
+        """
+        ieee = device_info.get("ieee_address")
+        if not isinstance(ieee, str) or not _IEEE_RE.fullmatch(ieee):
+            LOGGER.warning("Ignoring Control4 device with invalid IEEE %r", ieee)
+            return None
+        friendly_name = device_info.get("friendly_name", ieee)
+        # Some devices prefix their Zigbee modelID (the ROS reports
+        # "c4:control4_light:C4-V-ROSW120"); keep only the model.
+        model_id = _str_field(device_info, "model_id").rsplit(":", 1)[-1]
+        existing = self._devices.get(ieee)
+
+        name_ok = _valid_friendly_name(friendly_name)
+        if not name_ok:
+            LOGGER.warning(
+                "Ignoring invalid friendly name %r for Control4 device %s",
+                friendly_name,
+                ieee,
+            )
+        else:
+            holder = self._find_device_by_name(friendly_name)
+            taken = (holder is not None and holder.ieee_address != ieee) or (
+                claimed.get(friendly_name, ieee) != ieee
+            )
+            if taken:
+                LOGGER.warning(
+                    "Ignoring friendly name %r for Control4 device %s: "
+                    "another device already uses it",
+                    friendly_name,
+                    ieee,
+                )
+                name_ok = False
+
+        if existing is None:
+            if not name_ok:
+                return None
+            claimed[friendly_name] = ieee
+            existing = DeviceState(
+                ieee_address=ieee,
+                friendly_name=friendly_name,
+                model_id=model_id,
+            )
+            self._devices[ieee] = existing
+            LOGGER.info(
+                "Discovered Control4 device: %r (%s) model=%r",
+                friendly_name,
+                ieee,
+                model_id,
+            )
+        else:
+            if name_ok and existing.friendly_name != friendly_name:
+                LOGGER.warning(
+                    "Control4 device renamed: %r -> %r (%s)",
+                    existing.friendly_name,
+                    friendly_name,
+                    ieee,
+                )
+                existing.friendly_name = friendly_name
+                self._update_device_registry_name(ieee, friendly_name)
+            claimed[existing.friendly_name] = ieee
+            existing.model_id = model_id
+        # The outlet relay has no c4.dmx.dim answer, so its type comes
+        # from the model. Setting it also keeps c4_detect from being
+        # sent to a device whose converter can't take it.
+        if _is_outlet(device_info):
+            existing.device_type = DEVICE_TYPE_OUTLET
+        return ieee
+
+    def _drop_missing_devices(self, seen: set[str]) -> None:
+        """Drop devices missing from MISSING_LISTS_TO_DROP lists in a row."""
+        for ieee in list(self._devices):
+            if ieee in seen:
+                self._missing_lists.pop(ieee, None)
+                continue
+            misses = self._missing_lists.get(ieee, 0) + 1
+            if misses < MISSING_LISTS_TO_DROP:
+                self._missing_lists[ieee] = misses
+                LOGGER.info(
+                    "Control4 device %s missing from the device list; it is "
+                    "removed if the next list leaves it out too",
+                    ieee,
+                )
+                continue
+            LOGGER.warning("Control4 device removed: %s", ieee)
+            del self._devices[ieee]
+            self._missing_lists.pop(ieee, None)
+            self._prune_device_state(ieee)
+
+    def _replay_pending_states(self) -> None:
+        """Apply state payloads that arrived before the first device list."""
+        pending, self._pending_states = self._pending_states, {}
+        applied = 0
+        for name, payload in pending.items():
+            device = self._find_device_by_name(name)
+            if device is None:
+                continue
+            try:
+                device.update_from_mqtt(payload)
+                self._maybe_auto_detect(device)
+            except Exception:  # noqa: BLE001
+                LOGGER.exception("Could not apply buffered state for %r", name)
+                continue
+            applied += 1
+        if applied:
+            LOGGER.debug("Applied %d buffered state payloads after discovery", applied)
 
     def _prune_device_state(self, ieee: str) -> None:
         """
@@ -593,6 +735,14 @@ class Control4Manager:
             self._verifying.discard(key)
         for key in [k for k in self._verify_reads if k[0] == ieee]:
             del self._verify_reads[key]
+        for key in [k for k in self._press_pairs if k[0] == ieee]:
+            del self._press_pairs[key]
+        for key in [k for k in self._action_times if k[0] == ieee]:
+            del self._action_times[key]
+        for key in [k for k in self._led_cooldowns if k[0] == ieee]:
+            del self._led_cooldowns[key]
+        self._detect_sent.discard(ieee)
+        self._dimming_requested.discard(ieee)
         self._audit_attempts.pop(ieee, None)
         self._audit_summaries.pop(ieee, None)
 
@@ -618,28 +768,41 @@ class Control4Manager:
                 return
         if not isinstance(payload, dict):
             return
+        payload = sanitize_payload(payload)
 
         device = self._find_device_by_name(device_name)
         if device is None:
             # Device not yet known (bridge/devices may not have arrived).
-            # Buffer the payload so it can be applied after discovery.
-            self._pending_states[device_name] = payload
+            # Buffer the payload so it can be applied after discovery, but
+            # only until the first device list, and only up to a cap: every
+            # non-C4 Zigbee device (and any name a broker client invents)
+            # lands here too.
+            if not self._device_list_seen and (
+                device_name in self._pending_states
+                or len(self._pending_states) < PENDING_STATES_MAX
+            ):
+                self._pending_states[device_name] = payload
             return
 
         device.update_from_mqtt(payload)
 
-        # Resolve a pending read-back verify (issue #145). The converter
-        # echoes c4_verified_slot alongside the observed values in the same
-        # payload, so by the time we get here DeviceState already holds the
-        # observed values the verify pass will compare against.
-        verified_slot = payload.get("c4_verified_slot")
-        if verified_slot is not None:
-            self._resolve_verify(device.ieee_address, verified_slot, payload)
+        # A retained message is a replay of old state (from the broker, at
+        # every Home Assistant start and reload), not something the device
+        # just did. Its state is still applied above, but it must not run a
+        # button's action or answer a verify read.
+        if getattr(msg, "retain", False) is not True:
+            # Resolve a pending read-back verify (issue #145). The converter
+            # echoes c4_verified_slot alongside the observed values in the
+            # same payload, so by the time we get here DeviceState already
+            # holds the observed values the verify pass will compare against.
+            verified_slot = payload.get("c4_verified_slot")
+            if verified_slot is not None:
+                self._resolve_verify(device.ieee_address, verified_slot, payload)
 
-        # Dispatch button action events (press / click) to event entities.
-        action = payload.get("action")
-        if action:
-            self._dispatch_button_action(device, action)
+            # Dispatch button action events (press / click) to event entities.
+            action = payload.get("action")
+            if action:
+                self._dispatch_button_action(device, action)
 
         self._maybe_auto_detect(device)
         self._maybe_read_dimming(device)
@@ -709,7 +872,7 @@ class Control4Manager:
         """Save device configuration and push LED colors via MQTT."""
         state = self._devices.get(ieee_address)
         if state is None:
-            LOGGER.error("Cannot configure unknown device: %s", ieee_address)
+            LOGGER.error("Cannot configure unknown device: %r", ieee_address)
             return
 
         config = self._store.get_device(ieee_address) or DeviceConfig(
@@ -734,7 +897,11 @@ class Control4Manager:
             config.backlight_color = backlight_color
 
         config.friendly_name = state.friendly_name
-        if state.device_type:
+        # The live type comes from MQTT and is untrusted. Record it only
+        # when the stored config has no type yet (the type the user saw in
+        # the card is then this live one); never let a live report replace
+        # a stored type.
+        if state.device_type and not config.effective_type:
             config.device_type = state.device_type
 
         # Seed default slots when a device is typed but has no slots yet.
@@ -1164,15 +1331,20 @@ class Control4Manager:
         the waiting pass compares against what was actually read, not
         against DeviceState's merge of this read over older cached values.
         """
+        if isinstance(slot_id, bool):
+            return
         try:
             key = (ieee, int(slot_id))
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
+            return
+        future = self._pending_verifies.get(key)
+        # Only keep a read-back somebody is waiting for, so a publisher
+        # cannot grow _verify_reads with arbitrary slot numbers.
+        if future is None or future.done():
             return
         if payload is not None:
             self._verify_reads[key] = _extract_slot_fields(payload, key[1])
-        future = self._pending_verifies.get(key)
-        if future is not None and not future.done():
-            future.set_result(None)
+        future.set_result(None)
 
     # ── Periodic config audit sweep (issue #199) ─────────────────────
     #
@@ -1969,6 +2141,32 @@ class Control4Manager:
             return True
         return self._effective_type(device) == DEVICE_TYPE_SWITCH
 
+    def has_load(self, ieee_address: str) -> bool:
+        """Return whether a device's type drives a load (so it can meter one)."""
+        device = self._devices.get(ieee_address)
+        if device is None:
+            return False
+        return self._effective_type(device) in (
+            *LOAD_BEARING_TYPES,
+            DEVICE_TYPE_OUTLET,
+        )
+
+    def confirmed_type(self, ieee_address: str) -> str | None:
+        """
+        Return a device's type when it does not rest on live MQTT alone.
+
+        That is the stored type (detected and saved, or an override the
+        user set), or the outlet type assigned from the device model.
+        Returns None for a device whose only type is a live MQTT report.
+        """
+        config = self._store.get_device(ieee_address)
+        if config and config.effective_type:
+            return config.effective_type
+        device = self._devices.get(ieee_address)
+        if device and device.device_type == DEVICE_TYPE_OUTLET:
+            return DEVICE_TYPE_OUTLET
+        return None
+
     def has_dimming_table(self, ieee_address: str) -> bool:
         """
         Return whether a device drives a dimmable load with a dimming table.
@@ -2097,14 +2295,15 @@ class Control4Manager:
         """
         state = self._devices.get(ieee_address)
         if state is None:
-            return
+            msg = f"Unknown or undiscovered Control4 device: {ieee_address!r}"
+            raise HomeAssistantError(msg)
         topic = f"{self.mqtt_topic}/{state.friendly_name}/set"
         async with self._device_lock(self._send_locks, ieee_address):
             wait = self._next_send_at.get(ieee_address, 0.0) - time.monotonic()
             if wait > 0:
                 await asyncio.sleep(wait)
             if "c4_cmd" in payload:
-                LOGGER.info("MQTT -> %s: %s", state.friendly_name, payload["c4_cmd"])
+                LOGGER.info("MQTT -> %r: %r", state.friendly_name, payload["c4_cmd"])
             try:
                 await mqtt.async_publish(self._hass, topic, json.dumps(payload), qos=1)
             finally:
@@ -2213,28 +2412,46 @@ def _extract_slot_fields(
     return led, btn
 
 
+def _str_field(data: Any, key: str) -> str:
+    """Return data[key] if data is a dict and the value a string, else ""."""
+    value = data.get(key) if isinstance(data, dict) else None
+    return value if isinstance(value, str) else ""
+
+
+def _valid_friendly_name(name: Any) -> bool:
+    """
+    Return whether a Zigbee2MQTT friendly name is safe to use.
+
+    It becomes part of an MQTT topic and of log lines, so MQTT wildcards
+    and control characters are refused.
+    """
+    if not isinstance(name, str) or not 0 < len(name) <= _FRIENDLY_NAME_MAX:
+        return False
+    if "+" in name or "#" in name:
+        return False
+    return all(ord(ch) >= 0x20 and ord(ch) != 0x7F for ch in name)  # noqa: PLR2004
+
+
 def _is_outlet(device_info: dict) -> bool:
     """Check if a Z2M device info dict is a Control4 outlet relay (ROS)."""
-    model = (device_info.get("definition") or {}).get("model", "")
+    model = _str_field(device_info.get("definition"), "model")
     # Z2M's model_id is the raw Zigbee modelID, e.g.
     # "c4:control4_light:C4-V-ROSW120".
-    model_id = device_info.get("model_id", "").rsplit(":", 1)[-1]
+    model_id = _str_field(device_info, "model_id").rsplit(":", 1)[-1]
     return model in OUTLET_MODELS or model_id in OUTLET_MODELS
 
 
 def _is_control4_device(device_info: dict) -> bool:
     """Check if a Z2M device info dict is a Control4 device."""
-    definition = device_info.get("definition") or {}
+    definition = device_info.get("definition")
     c4 = C4_MANUFACTURER_NAME.lower()
     # Z2M uses "vendor" in definition, but check both for safety
     for key in ("vendor", "manufacturer"):
-        if c4 in definition.get(key, "").lower():
+        if c4 in _str_field(definition, key).lower():
             return True
     # Top-level "manufacturer" field
-    if c4 in device_info.get("manufacturer", "").lower():
+    if c4 in _str_field(device_info, "manufacturer").lower():
         return True
-    model = definition.get("model", "")
-    if model in C4_MODEL_IDS:
+    if _str_field(definition, "model") in C4_MODEL_IDS:
         return True
-    model_id = device_info.get("model_id", "")
-    return model_id in C4_MODEL_IDS
+    return _str_field(device_info, "model_id") in C4_MODEL_IDS

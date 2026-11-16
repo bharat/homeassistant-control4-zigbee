@@ -418,7 +418,7 @@ class TestManagerEventCallbacks:
         manager.register_event_callback(IEEE_DIMMER, 2, cb)
         with patch(
             "custom_components.control4_dimmers.manager.time.monotonic",
-            side_effect=[100.0, 100.0 + PRESS_PAIR_WINDOW + 0.1],
+            side_effect=[100.0, 100.0, 100.0 + PRESS_PAIR_WINDOW + 0.1],
         ):
             manager._dispatch_button_action(dimmer_state, "button_2_press")
             manager._dispatch_button_action(dimmer_state, "button_2_scene")
@@ -504,7 +504,23 @@ class TestManagerBridgeDevices:
 
         msg2 = _make_mqtt_msg("zigbee2mqtt/bridge/devices", [])
         await manager._handle_bridge_devices(msg2)
+        # One list without the device is not enough: a forged or truncated
+        # list must not wipe every device at once.
+        assert IEEE_DIMMER in manager.devices
+        await manager._handle_bridge_devices(msg2)
         assert IEEE_DIMMER not in manager.devices
+
+    @pytest.mark.asyncio
+    async def test_reappearing_device_resets_missing_count(
+        self, manager: Control4Manager
+    ) -> None:
+        present = _make_mqtt_msg("zigbee2mqtt/bridge/devices", [make_bridge_device()])
+        empty = _make_mqtt_msg("zigbee2mqtt/bridge/devices", [])
+        await manager._handle_bridge_devices(present)
+        await manager._handle_bridge_devices(empty)
+        await manager._handle_bridge_devices(present)
+        await manager._handle_bridge_devices(empty)
+        assert IEEE_DIMMER in manager.devices
 
     @pytest.mark.asyncio
     async def test_updates_friendly_name(self, manager: Control4Manager) -> None:
