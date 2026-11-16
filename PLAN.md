@@ -15,6 +15,7 @@ functional, running in production against a 31-device fleet.
 - Bundled Lovelace card (`control4-dimmer-card`) with dashboard view and visual chassis editor
 - WebSocket API for card-to-backend communication
 - Development simulator (`scripts/simulate_devices.py`) with fake Control4 devices
+- Listed in the HACS default store (since 2026-11); releases ship a versioned zip
 
 **The Zigbee side** lives in separate repos (moved out of this one in 2026-08):
 
@@ -80,4 +81,3 @@ Tracked in [issue #104](https://github.com/bharat/homeassistant-control4-zigbee/
 
 - Upstream campaign (Phase 7, above)
 - Identify the last two `c4.dmx.ls` fields (field 9 looks like an energy counter, field 10 is unknown)
-- HACS default-repository inclusion (gated on upstream support so strangers get a working stack)

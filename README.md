@@ -3,6 +3,7 @@
 [![Tests](https://github.com/bharat/homeassistant-control4-zigbee/actions/workflows/test.yml/badge.svg?branch=main)](https://github.com/bharat/homeassistant-control4-zigbee/actions/workflows/test.yml?query=branch%3Amain)
 [![Validate](https://github.com/bharat/homeassistant-control4-zigbee/actions/workflows/validate.yml/badge.svg?branch=main)](https://github.com/bharat/homeassistant-control4-zigbee/actions/workflows/validate.yml?query=branch%3Amain)
 [![Lint](https://github.com/bharat/homeassistant-control4-zigbee/actions/workflows/lint.yml/badge.svg?branch=main)](https://github.com/bharat/homeassistant-control4-zigbee/actions/workflows/lint.yml?query=branch%3Amain)
+[![HACS Default](https://img.shields.io/badge/HACS-Default-41BDF5.svg)](https://github.com/hacs/integration)
 
 > **Background:** Control4 ships solid Zigbee dimmers and keypads. This
 > project bridges them into Home Assistant alongside other Zigbee devices,
@@ -72,11 +73,35 @@ These devices are not Control4 dimmers, but they all use Zigbee. If you have one
 
 ## Installation
 
-### HA Custom Component
+### Through HACS (recommended)
 
-Install the `custom_components/control4_dimmers` directory into your Home
-Assistant `custom_components/` folder and restart. The integration auto-discovers
-Control4 devices from Zigbee2MQTT and provides:
+The integration is in the HACS default store, so there is nothing to add by
+hand:
+
+1. Open HACS in Home Assistant.
+2. Search for **Control4 Zigbee** and open it.
+3. Click **Download** and confirm.
+4. Restart Home Assistant.
+5. Go to **Settings > Devices & services > Add integration**, search for
+   **Control4 Zigbee**, and enter your Zigbee2MQTT base topic (usually
+   `zigbee2mqtt`).
+
+HACS installs the versioned zip attached to each GitHub release, so the
+version shown in Home Assistant matches the release tag. Updates show up in
+HACS like any other integration.
+
+### Manual install
+
+Download `control4_dimmers.zip` from the
+[latest release](https://github.com/bharat/homeassistant-control4-zigbee/releases/latest),
+unzip it into your Home Assistant `custom_components/control4_dimmers/`
+folder, and restart Home Assistant. Then add the integration as in step 5
+above.
+
+### What the integration provides
+
+The integration auto-discovers Control4 devices from Zigbee2MQTT and
+provides:
 
 - **Lovelace card** with an entities-card-style header, per-button LED
   indicators, and click-to-open light control.
@@ -87,14 +112,14 @@ Control4 devices from Zigbee2MQTT and provides:
 - **Light entities** for dimmers with brightness control via the native HA
   more-info dialog.
 
-### Installed through HACS before November 2026?
+### Added this repository as a custom repository earlier?
 
-This repository was renamed from `homeassistant-control4-dimmers` to
-`homeassistant-control4-zigbee`. Your installed integration keeps working, and
-the integration domain (`control4_dimmers`) is unchanged, so entities and
-automations are unaffected. To keep getting updates, remove the old custom
-repository in HACS and add `https://github.com/bharat/homeassistant-control4-zigbee`
-in its place (category: Integration). The installed files stay put while you do.
+If you added `bharat/homeassistant-control4-zigbee` (or its old name,
+`bharat/homeassistant-control4-dimmers`) as a custom repository in HACS,
+remove that custom repository entry in HACS. The installed integration keeps
+working and now updates from the default store. The integration domain
+(`control4_dimmers`) is unchanged, so entities and automations are
+unaffected.
 
 ## Migrating a Device from Control4
 
