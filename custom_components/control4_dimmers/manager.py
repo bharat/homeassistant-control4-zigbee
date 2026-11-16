@@ -16,6 +16,7 @@ from homeassistant.core import Context
 from homeassistant.core import callback as ha_callback
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import device_registry as dr
+from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.event import async_track_time_interval
 from homeassistant.util import dt as dt_util
 
@@ -55,6 +56,7 @@ from .models import (
     SlotConfig,
     _extract_color,
     sanitize_payload,
+    valid_hex,
 )
 from .store import Control4Store  # noqa: TC001
 
@@ -844,6 +846,10 @@ class Control4Manager:
             "led_colors": {str(k): v for k, v in state.led_colors.items()},
             "button_configs": {str(k): v for k, v in state.button_configs.items()},
             "config": config_dict,
+            # The entity that drives this device's own load, resolved here
+            # through the registries so the card never has to guess it
+            # from a friendly name.
+            "load_entity_id": self.load_entity_id(ieee_address),
         }
 
     def get_all_devices_info(
@@ -1022,9 +1028,12 @@ class Control4Manager:
         """
         if config.backlight_color is None:
             return
+        color = _cmd_color(config.backlight_color, state, "backlight")
+        if color is None:
+            return
         await self.async_send_mqtt(
             state.ieee_address,
-            {"c4_cmd": f"c4.dmx.blc 00 05 {config.backlight_color}"},
+            {"c4_cmd": f"c4.dmx.blc 00 05 {color}"},
         )
 
     async def _push_single_slot(
@@ -1785,24 +1794,30 @@ class Control4Manager:
         #   - push_release: press color / release color
         #   - fixed (Programmed): mode 03 / mode 04 alone don't light
         #     the LED; the mode-05 override below is what drives it.
-        await self.async_send_mqtt(
-            state.ieee_address,
-            {"c4_cmd": f"c4.dmx.led {wire_id:02x} 03 {slot.led_on_color}"},
-        )
-        await self.async_send_mqtt(
-            state.ieee_address,
-            {"c4_cmd": f"c4.dmx.led {wire_id:02x} 04 {slot.led_off_color}"},
-        )
+        # Stored colors are validated on input and on load; check again
+        # here, where they are spliced into a firmware command.
+        on_color = _cmd_color(slot.led_on_color, state, f"slot {slot.slot_id} on")
+        off_color = _cmd_color(slot.led_off_color, state, f"slot {slot.slot_id} off")
+        if on_color is not None:
+            await self.async_send_mqtt(
+                state.ieee_address,
+                {"c4_cmd": f"c4.dmx.led {wire_id:02x} 03 {on_color}"},
+            )
+        if off_color is not None:
+            await self.async_send_mqtt(
+                state.ieee_address,
+                {"c4_cmd": f"c4.dmx.led {wire_id:02x} 04 {off_color}"},
+            )
         # Programmed-mode display. Without a Composer programming
         # engine driving the firmware's internal "state", neither
         # mode 03 nor mode 04 lights the LED in Programmed mode.
         # Mode 05 is the explicit override that does. The chassis
         # editor's single "Color" picker for fixed mode binds to
         # led_off_color, so the user's picked color lives there.
-        if slot.led_mode == "fixed":
+        if slot.led_mode == "fixed" and off_color is not None:
             await self.async_send_mqtt(
                 state.ieee_address,
-                {"c4_cmd": f"c4.dmx.led {wire_id:02x} 05 {slot.led_off_color}"},
+                {"c4_cmd": f"c4.dmx.led {wire_id:02x} 05 {off_color}"},
             )
         # Store behavior and LED mode in Z2M state for frontend.
         firmware_led_mode = "programmed" if slot.led_mode == "fixed" else slot.led_mode
@@ -1823,15 +1838,52 @@ class Control4Manager:
         return None
 
     def _find_light_entity(self, ieee: str) -> str | None:
-        """Find the Z2M light entity for a C4 device by friendly_name match."""
+        """
+        Find the Zigbee2MQTT light entity that drives a device's own load.
+
+        Resolved through the registries: the light of the MQTT device that
+        Zigbee2MQTT registers for this IEEE. If that device is not found
+        (an older Zigbee2MQTT, discovery disabled) it falls back to a
+        friendly-name match, but only among MQTT lights, so a device
+        renamed after another integration's light can never point its load
+        at that light.
+        """
         device = self._devices.get(ieee)
         if device is None:
             return None
+        ent_reg = er.async_get(self._hass)
+        z2m_device = dr.async_get(self._hass).async_get_device(
+            identifiers={("mqtt", f"zigbee2mqtt_{ieee}")}
+        )
+        if z2m_device is not None:
+            for entry in er.async_entries_for_device(ent_reg, z2m_device.id):
+                if entry.domain == "light" and entry.platform == "mqtt":
+                    return entry.entity_id
         for state in self._hass.states.async_all("light"):
-            friendly = state.attributes.get("friendly_name", "")
-            if friendly == device.friendly_name:
+            if state.attributes.get("friendly_name", "") != device.friendly_name:
+                continue
+            entry = ent_reg.async_get(state.entity_id)
+            if entry is not None and entry.platform == "mqtt":
                 return state.entity_id
         return None
+
+    def load_entity_id(self, ieee: str) -> str | None:
+        """
+        Return the entity that drives a device's own load, if there is one.
+
+        A relay-only switch owns its load entity (this integration's
+        switch); everything else uses Zigbee2MQTT's light.
+        """
+        device = self._devices.get(ieee)
+        if device is None:
+            return None
+        if self._effective_type(device) == DEVICE_TYPE_SWITCH:
+            switch_id = er.async_get(self._hass).async_get_entity_id(
+                "switch", DOMAIN, f"{ieee}_switch"
+            )
+            if switch_id:
+                return switch_id
+        return self._find_light_entity(ieee)
 
     def _resolve_entity_id(self, ieee: str, entity_id: str) -> str | None:
         """Resolve __self_load__ to the actual light entity, or return as-is."""
@@ -1970,7 +2022,9 @@ class Control4Manager:
                     return
                 target_state = self._hass.states.get(track_entity)
                 is_on = target_state and target_state.state == "on"
-                color = slot.led_off_color if is_on else slot.led_on_color
+                color = valid_hex(slot.led_off_color if is_on else slot.led_on_color)
+                if color is None:
+                    return
                 wire_id = slot_id - 1
                 await self.async_try_send_mqtt(
                     ieee,
@@ -2001,9 +2055,11 @@ class Control4Manager:
             for slot in config.slots:
                 if slot.led_track_entity_id:
                     resolved = self._resolve_entity_id(ieee, slot.led_track_entity_id)
-                    if resolved:
+                    on_color = valid_hex(slot.led_on_color)
+                    off_color = valid_hex(slot.led_off_color)
+                    if resolved and on_color and off_color:
                         tracking.setdefault(resolved, []).append(
-                            (ieee, slot.slot_id, slot.led_on_color, slot.led_off_color)
+                            (ieee, slot.slot_id, on_color, off_color)
                         )
 
         self._led_tracking = tracking
@@ -2050,9 +2106,13 @@ class Control4Manager:
         bypassing the firmware's on/off state logic.
         """
         wire_id = slot_id - 1
+        clean = valid_hex(color)
+        if clean is None:
+            LOGGER.error("Not sending invalid LED color %r for slot %s", color, slot_id)
+            return False
         return await self.async_try_send_mqtt(
             ieee,
-            {"c4_cmd": f"c4.dmx.led {wire_id:02x} 05 {color}"},
+            {"c4_cmd": f"c4.dmx.led {wire_id:02x} 05 {clean}"},
             f"LED tracking update for slot {slot_id}",
         )
 
@@ -2375,6 +2435,16 @@ def _click_count_to_event_type(count: int) -> str:
 
 
 _ACTION_FIELDS = ("tap_action", "double_tap_action", "hold_action")
+
+
+def _cmd_color(value: Any, state: DeviceState, what: str) -> str | None:
+    """Return a color fit for a c4_cmd string, or None (logged) if invalid."""
+    color = valid_hex(value)
+    if color is None:
+        LOGGER.error(
+            "Not sending invalid %s color %r to %r", what, value, state.friendly_name
+        )
+    return color
 
 
 def _strip_action_data(config_dict: dict[str, Any]) -> dict[str, Any]:

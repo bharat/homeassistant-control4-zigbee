@@ -10,6 +10,9 @@
     },
     "abort": {
       "already_configured": "Control4 Zigbee is already configured."
+    },
+    "error": {
+      "invalid_topic": "Enter a topic without +, # or a leading or trailing slash, for example zigbee2mqtt."
     }
   },
   "options": {
@@ -22,6 +25,9 @@
           "audit_mode": "Audit mode"
         }
       }
+    },
+    "error": {
+      "invalid_topic": "Enter a topic without +, # or a leading or trailing slash, for example zigbee2mqtt."
     }
   },
   "selector": {

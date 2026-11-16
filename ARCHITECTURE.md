@@ -105,7 +105,7 @@ MQTT topics and manages HA entities.
 
 ### Layer 4: Lovelace Card (JavaScript)
 
-The card (`frontend/control4-dimmer-card.js`) binds to the sensor anchor entity,
+The card (`frontend/www/control4-dimmer-card.js`) binds to the sensor anchor entity,
 discovers sibling entities via the HA device registry, and reads button
 configuration from each event entity's attributes.
 

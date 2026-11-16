@@ -49,6 +49,7 @@ CARD_JS = (
     / "custom_components"
     / "control4_dimmers"
     / "frontend"
+    / "www"
     / "control4-dimmer-card.js"
 )
 
@@ -130,3 +131,107 @@ class TestCardEscaping:
         )
         assert result.stdout == "&lt;img src=x onerror=alert(1)&gt;"
         assert "<" not in result.stdout
+
+
+# ── what is served ───────────────────────────────────────────────────
+
+
+class TestServedFiles:
+    """Only the card is reachable under the integration's static URL."""
+
+    async def test_only_www_is_registered(self) -> None:
+        from unittest.mock import AsyncMock, MagicMock  # noqa: PLC0415
+
+        from custom_components.control4_dimmers.const import URL_BASE  # noqa: PLC0415
+        from custom_components.control4_dimmers.frontend import (  # noqa: PLC0415
+            WWW_DIR,
+        )
+
+        reg = JSModuleRegistration.__new__(JSModuleRegistration)
+        reg.hass = MagicMock()
+        reg.hass.http.async_register_static_paths = AsyncMock()
+        await reg._async_register_path()
+        [configs] = reg.hass.http.async_register_static_paths.await_args.args
+        assert [(c.url_path, c.path) for c in configs] == [(URL_BASE, str(WWW_DIR))]
+        assert CARD_JS.parent == WWW_DIR
+        # Nothing but the card lives in the served directory.
+        assert sorted(p.name for p in WWW_DIR.iterdir()) == [CARD_JS.name]
+
+
+# ── card behavior under hostile stored data ──────────────────────────
+
+_NODE_STUBS = r"""
+globalThis.HTMLElement = class {};
+globalThis.customElements = { define() {}, get() { return true; } };
+globalThis.window = {
+  customCards: [], addEventListener() {}, removeEventListener() {},
+};
+globalThis.document = { querySelectorAll() { return []; } };
+globalThis.CSS = { escape: (s) => String(s) };
+console.info = () => {};
+"""
+
+_NODE_CHECKS = r"""
+const out = {};
+const t0 = Date.now();
+const huge = computeLayout([{ slot_id: 1, size: 1000000000 }], "keypad");
+out.hugeSize = huge[0].size;
+out.hugeMs = Date.now() - t0;
+out.protoLayout = computeLayout([{ slot_id: 1 }], "constructor").length;
+out.protoDefaults = defaultSlotsForType("__proto__").length;
+out.badAction = typeof actionChipsHtml({ action: 5 }, null);
+out.listTarget = actionChipsHtml(
+  { action: "light.toggle", target: { entity_id: ["light.a", "light.b"] } }, null);
+out.withData = actionChipsHtml(
+  { action: "alarm_control_panel.alarm_disarm", data: { code: "1234" } }, null);
+out.protoIcon = actionChipsHtml({ action: "constructor.x" }, null);
+const el = { style: {} };
+out.ledHex = setLedColor(el, "000 url(https://attacker.example/beacon)");
+out.ledBg = el.style.background;
+out.ownEntity = isOwnEntity(
+  { entities: { "sensor.a": { platform: "control4_dimmers" },
+                "sensor.b": { platform: "mqtt" } } }, "sensor.b");
+process.stdout.write(JSON.stringify(out));
+"""
+
+
+class TestCardHardening:
+    """Run the card's helpers in node against hostile stored values."""
+
+    def _run(self, tmp_path: Path) -> dict:
+        import json  # noqa: PLC0415
+
+        node = shutil.which("node")
+        if node is None:
+            pytest.skip("node is not installed")
+        module = tmp_path / "card.mjs"
+        module.write_text(_NODE_STUBS + CARD_JS.read_text() + _NODE_CHECKS)
+        result = subprocess.run(  # noqa: S603
+            [node, str(module)], capture_output=True, text=True, check=True
+        )
+        return json.loads(result.stdout)
+
+    def test_hostile_values_do_not_break_the_card(self, tmp_path: Path) -> None:
+        out = self._run(tmp_path)
+        assert out["hugeSize"] == 6
+        assert out["hugeMs"] < 1000
+        assert out["protoLayout"] == 0
+        assert out["protoDefaults"] == 0
+        assert out["badAction"] == "string"
+        assert "light.a" in out["listTarget"]
+        assert "light.b" in out["listTarget"]
+        assert "+ data" in out["withData"]
+        assert "1234" not in out["withData"]
+        assert "mdi:cog" in out["protoIcon"]
+        assert out["ledHex"] == "000000"
+        assert out["ledBg"] == "#000000"
+        assert out["ownEntity"] is False
+
+    def test_no_unvalidated_led_or_selector_sinks(self) -> None:
+        src = CARD_JS.read_text()
+        # Every CSSOM LED color goes through setLedColor (which runs safeHex).
+        assert src.count(".style.background =") == 1
+        assert "querySelector(`.chassis" not in src
+        # Type and icon tables are only read through ownGet.
+        assert "DEVICE_TYPES[" not in src
+        assert "DOMAIN_ICONS[" not in src

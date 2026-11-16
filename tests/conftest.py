@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator
+from types import SimpleNamespace
 from typing import Any
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, NonCallableMock, patch
 
 import pytest
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers import device_registry as dr
+from homeassistant.helpers import entity_registry as er
 
 from custom_components.control4_dimmers.manager import Control4Manager
 from custom_components.control4_dimmers.models import (
@@ -16,6 +20,115 @@ from custom_components.control4_dimmers.models import (
     SlotConfig,
 )
 from custom_components.control4_dimmers.store import Control4Store
+
+# ── Fake registries for MagicMock-based hass ──────────────────────────
+
+
+class FakeEntityRegistry:
+    """
+    The slice of the entity registry the integration reads.
+
+    Entities are added with add(). Any light.* that was not added resolves
+    to an MQTT-platform entry, the way Zigbee2MQTT's lights do.
+    """
+
+    def __init__(self) -> None:
+        """Start empty."""
+        self.entries: dict[str, SimpleNamespace] = {}
+
+    def add(
+        self,
+        entity_id: str,
+        unique_id: str,
+        platform: str = "control4_dimmers",
+        device_id: str | None = None,
+    ) -> None:
+        """Register an entity."""
+        self.entries[entity_id] = SimpleNamespace(
+            entity_id=entity_id,
+            domain=entity_id.split(".", 1)[0],
+            platform=platform,
+            unique_id=unique_id,
+            device_id=device_id,
+        )
+
+    def async_get(self, entity_id: str) -> SimpleNamespace | None:
+        """Return an entry by entity_id."""
+        if entity_id in self.entries:
+            return self.entries[entity_id]
+        if entity_id.startswith("light."):
+            return SimpleNamespace(
+                entity_id=entity_id,
+                domain="light",
+                platform="mqtt",
+                unique_id=entity_id,
+                device_id=None,
+            )
+        return None
+
+    def async_get_entity_id(
+        self, domain: str, platform: str, unique_id: str
+    ) -> str | None:
+        """Return the entity_id registered for a unique_id."""
+        for entry in self.entries.values():
+            if (entry.domain, entry.platform, entry.unique_id) == (
+                domain,
+                platform,
+                unique_id,
+            ):
+                return entry.entity_id
+        return None
+
+
+class FakeDeviceRegistry:
+    """A device registry with no devices in it."""
+
+    def async_get_device(self, **_kwargs: Any) -> None:
+        """No device matches."""
+
+    def async_get(self, _device_id: str) -> None:
+        """No device matches."""
+
+    def async_update_device(self, *_args: Any, **_kwargs: Any) -> None:
+        """Accept and ignore updates."""
+
+
+_FAKE_ENT_REGS: dict[int, FakeEntityRegistry] = {}
+
+
+def fake_entity_registry(hass: Any) -> FakeEntityRegistry:
+    """Return the fake entity registry used for a MagicMock hass."""
+    return _FAKE_ENT_REGS.setdefault(id(hass), FakeEntityRegistry())
+
+
+@pytest.fixture(autouse=True)
+def _fake_registries() -> Iterator[None]:
+    """
+    Give MagicMock-based hass objects an entity and device registry.
+
+    A real hass (or a mock whose hass.data already carries a registry)
+    gets the real lookup.
+    """
+    real_er, real_dr = er.async_get, dr.async_get
+
+    def _er(hass: Any) -> Any:
+        if isinstance(hass, NonCallableMock) and er.DATA_REGISTRY not in getattr(
+            hass, "data", {}
+        ):
+            return fake_entity_registry(hass)
+        return real_er(hass)
+
+    def _dr(hass: Any) -> Any:
+        if isinstance(hass, NonCallableMock) and dr.DATA_REGISTRY not in getattr(
+            hass, "data", {}
+        ):
+            return FakeDeviceRegistry()
+        return real_dr(hass)
+
+    with patch.object(er, "async_get", _er), patch.object(dr, "async_get", _dr):
+        yield
+    _FAKE_ENT_REGS.clear()
+
 
 # ── Fixtures: mock Home Assistant core ────────────────────────────────
 
