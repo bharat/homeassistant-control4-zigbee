@@ -29,7 +29,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable
 
     from homeassistant.config_entries import ConfigEntry
-    from homeassistant.core import HomeAssistant
+    from homeassistant.core import Context, HomeAssistant
     from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
     from .manager import Control4Manager
@@ -253,7 +253,10 @@ class Control4ButtonEvent(EventEntity):
             "led_mode": led_mode,
             "ieee_address": self._ieee,
             "slot_id": self._slot_id,
-            "tap_action": slot_cfg.tap_action if slot_cfg else None,
+            # The slot's stored actions are deliberately not exposed: state
+            # attributes are readable by every user and kept in history,
+            # and action data can hold secrets. Admins read actions through
+            # the websocket API instead.
             "led_track_entity_id": slot_cfg.led_track_entity_id if slot_cfg else None,
         }
         # Derive behavior for backward compat with existing automations
@@ -352,9 +355,11 @@ class Control4ButtonEvent(EventEntity):
         self._custom_name = new_name
         return self._custom_name != old_name
 
-    def _on_button_event(self, event_type: str) -> None:
+    def _on_button_event(self, event_type: str, context: Context | None) -> None:
         """Handle a button event dispatched by the manager."""
         self._trigger_event(event_type)
+        if context is not None:
+            self.async_set_context(context)
         self.async_write_ha_state()
 
 
@@ -408,7 +413,9 @@ class Control4PaddleEvent(EventEntity):
             self._unsub_event()
             self._unsub_event = None
 
-    def _on_paddle_event(self, event_type: str) -> None:
+    def _on_paddle_event(self, event_type: str, context: Context | None) -> None:
         """Handle a paddle event dispatched by the manager."""
         self._trigger_event(event_type)
+        if context is not None:
+            self.async_set_context(context)
         self.async_write_ha_state()

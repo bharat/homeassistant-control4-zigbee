@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, Any, ClassVar
 
 from homeassistant.components import mqtt
 from homeassistant.const import EVENT_STATE_CHANGED
+from homeassistant.core import Context
 from homeassistant.core import callback as ha_callback
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import device_registry as dr
@@ -131,9 +132,10 @@ class Control4Manager:
         self._listeners: list[Callable[[], None]] = []
         self._pending_states: dict[str, dict] = {}  # buffered state payloads
         self._detect_sent: set[str] = set()  # IEEEs we've already sent c4_detect to
+        # (ieee, slot_id | paddle_id) -> callback(event_type, context)
         self._event_callbacks: dict[
-            tuple[str, int | str], Callable[[str], None]
-        ] = {}  # (ieee, slot_id | paddle_id) -> callback(event_type)
+            tuple[str, int | str], Callable[[str, Context | None], None]
+        ] = {}
         # (ieee, slot_id | paddle_id) -> (verb that fired "pressed", monotonic
         # time), waiting for the other half of the press/scene pair.
         self._press_pairs: dict[tuple[str, int | str], tuple[str, float]] = {}
@@ -244,7 +246,7 @@ class Control4Manager:
         self,
         ieee_address: str,
         slot_id: int | str,
-        callback: Callable[[str], None],
+        callback: Callable[[str, Context | None], None],
     ) -> Callable[[], None]:
         """
         Register a callback for button events on a specific slot or paddle.
@@ -252,7 +254,9 @@ class Control4Manager:
         slot_id is an int (1..6) for a button-array slot, or a paddle id
         string ("paddle_up" / "paddle_down") for a local load paddle half.
         The callback receives the event_type string (e.g. "pressed",
-        "double_tap").  Returns an unsubscribe callable.
+        "double_tap") and the Context of the press, so the event entity's
+        state write and any action the press runs share one context.
+        Returns an unsubscribe callable.
         """
         key = (ieee_address, slot_id)
         self._event_callbacks[key] = callback
@@ -274,16 +278,19 @@ class Control4Manager:
             return False
         paddle_id = paddle_match.group(1)
         verb = paddle_match.group(2)
+        context = Context()
         if verb == "release":
-            self.fire_button_event(device.ieee_address, paddle_id, "released")
+            self.fire_button_event(device.ieee_address, paddle_id, "released", context)
         elif verb in ("press", "scene"):
-            self._fire_pressed(device.ieee_address, paddle_id, verb)
+            self._fire_pressed(device.ieee_address, paddle_id, verb, context)
         else:  # click_N
             event_type = _click_count_to_event_type(int(paddle_match.group(3)))
-            self.fire_button_event(device.ieee_address, paddle_id, event_type)
+            self.fire_button_event(device.ieee_address, paddle_id, event_type, context)
         return True
 
-    def _fire_pressed(self, ieee: str, slot_id: int | str, verb: str) -> None:
+    def _fire_pressed(
+        self, ieee: str, slot_id: int | str, verb: str, context: Context | None = None
+    ) -> None:
         """
         Fire one "pressed" event per tap from a press/scene pair.
 
@@ -297,7 +304,7 @@ class Control4Manager:
         if pending and pending[0] != verb and now - pending[1] < PRESS_PAIR_WINDOW:
             return
         self._press_pairs[key] = (verb, now)
-        self.fire_button_event(ieee, slot_id, "pressed")
+        self.fire_button_event(ieee, slot_id, "pressed", context)
 
     def _dispatch_button_action(self, device: DeviceState, action_str: str) -> None:
         """Parse an action string from Z2M and dispatch to event entities."""
@@ -307,12 +314,19 @@ class Control4Manager:
         if self._dispatch_paddle_action(device, action_str):
             return
 
+        # One context per physical press, shared by the event entity's state
+        # write and any action the press runs, so the logbook and automation
+        # traces can tie the two together.
+        context = Context()
+
         # Press or scene: button_N_press (c4.dmx.bp), button_N_scene (c4.dmx.sc)
         press_match = re.match(r"button_(\d+)_(press|scene)", action_str)
         if press_match:
             slot_id = self._button_slot(device, int(press_match.group(1)))
             is_scene = press_match.group(2) == "scene"
-            self._fire_pressed(device.ieee_address, slot_id, press_match.group(2))
+            self._fire_pressed(
+                device.ieee_address, slot_id, press_match.group(2), context
+            )
             config = self._store.get_device(device.ieee_address)
             slot = self._find_slot(config, slot_id) if config else None
             behavior = slot.behavior if slot else "keypad"
@@ -334,7 +348,9 @@ class Control4Manager:
                 and (not slot or not slot.double_tap_action)
             ):
                 self._hass.async_create_task(
-                    self._press_button_task(device.ieee_address, slot_id, "pressed"),
+                    self._press_button_task(
+                        device.ieee_address, slot_id, "pressed", context
+                    ),
                     f"c4_action_{device.ieee_address}_{slot_id}",
                 )
             return
@@ -343,7 +359,7 @@ class Control4Manager:
         release_match = re.match(r"button_(\d+)_release", action_str)
         if release_match:
             slot_id = self._button_slot(device, int(release_match.group(1)))
-            self.fire_button_event(device.ieee_address, slot_id, "released")
+            self.fire_button_event(device.ieee_address, slot_id, "released", context)
             return
 
         # button_N_click_C  (from c4.dmx.cc)
@@ -352,7 +368,7 @@ class Control4Manager:
             slot_id = self._button_slot(device, int(click_match.group(1)))
             count = int(click_match.group(2))
             event_type = _click_count_to_event_type(count)
-            self.fire_button_event(device.ieee_address, slot_id, event_type)
+            self.fire_button_event(device.ieee_address, slot_id, event_type, context)
             # Load-control buttons: firmware handles load, skip software actions
             config = self._store.get_device(device.ieee_address)
             slot = self._find_slot(config, slot_id) if config else None
@@ -364,13 +380,15 @@ class Control4Manager:
                 if slot and slot.double_tap_action:
                     self._hass.async_create_task(
                         self._press_button_task(
-                            device.ieee_address, slot_id, "single_tap"
+                            device.ieee_address, slot_id, "single_tap", context
                         ),
                         f"c4_action_{device.ieee_address}_{slot_id}",
                     )
             elif count == 2:  # noqa: PLR2004
                 self._hass.async_create_task(
-                    self._press_button_task(device.ieee_address, slot_id, "double_tap"),
+                    self._press_button_task(
+                        device.ieee_address, slot_id, "double_tap", context
+                    ),
                     f"c4_action_{device.ieee_address}_{slot_id}",
                 )
             return
@@ -396,7 +414,13 @@ class Control4Manager:
         top, bottom = DEVICE_TYPE_SLOTS[device_type]
         return top if button <= SLOT_COUNT // 2 else bottom
 
-    def fire_button_event(self, ieee: str, slot_id: int | str, event_type: str) -> None:
+    def fire_button_event(
+        self,
+        ieee: str,
+        slot_id: int | str,
+        event_type: str,
+        context: Context | None = None,
+    ) -> None:
         """Fire a button/paddle event on the event entity for a slot."""
         if event_type not in BUTTON_EVENT_TYPES:
             # Defense in depth (issue #178): an undeclared type makes HA's
@@ -411,7 +435,7 @@ class Control4Manager:
             return
         cb = self._event_callbacks.get((ieee, slot_id))
         if cb is not None:
-            cb(event_type)
+            cb(event_type, context)
             LOGGER.debug("Button event: %s slot %s -> %s", ieee, slot_id, event_type)
 
     async def async_start(self) -> None:
@@ -629,12 +653,23 @@ class Control4Manager:
                 return device
         return None
 
-    def get_device_info(self, ieee_address: str) -> dict[str, Any] | None:
-        """Get combined device state + config for the websocket API."""
+    def get_device_info(
+        self, ieee_address: str, *, include_action_data: bool = True
+    ) -> dict[str, Any] | None:
+        """
+        Get combined device state + config for the websocket API.
+
+        include_action_data=False drops the data of every stored slot
+        action. Action data can hold secrets (an alarm code, a token for a
+        REST call), so only administrators get to read it.
+        """
         state = self._devices.get(ieee_address)
         if state is None:
             return None
         config = self._store.get_device(ieee_address)
+        config_dict = config.to_dict() if config else None
+        if config_dict is not None and not include_action_data:
+            config_dict = _strip_action_data(config_dict)
         return {
             "ieee_address": ieee_address,
             "friendly_name": state.friendly_name,
@@ -645,15 +680,22 @@ class Control4Manager:
             "state": state.state,
             "led_colors": {str(k): v for k, v in state.led_colors.items()},
             "button_configs": {str(k): v for k, v in state.button_configs.items()},
-            "config": config.to_dict() if config else None,
+            "config": config_dict,
         }
 
-    def get_all_devices_info(self) -> list[dict[str, Any]]:
+    def get_all_devices_info(
+        self, *, include_action_data: bool = True
+    ) -> list[dict[str, Any]]:
         """Get info for all discovered devices."""
         return [
             info
             for ieee in self._devices
-            if (info := self.get_device_info(ieee)) is not None
+            if (
+                info := self.get_device_info(
+                    ieee, include_action_data=include_action_data
+                )
+            )
+            is not None
         ]
 
     async def async_configure_device(
@@ -727,12 +769,19 @@ class Control4Manager:
         Resends the stored slot config over MQTT, rebuilds light
         tracking, and notifies listeners without mutating anything in
         the store. Returns False if the device or its config is unknown.
+        Raises HomeAssistantError if a push to the device is already in
+        flight, so repeated calls cannot queue up bursts of mesh traffic
+        (issue #144).
         """
         state = self._devices.get(ieee_address)
         config = self._store.get_device(ieee_address)
         if state is None or config is None:
             LOGGER.error("Cannot push config for unknown device: %s", ieee_address)
             return False
+        lock = self._push_locks.get(ieee_address)
+        if lock is not None and lock.locked():
+            msg = f"A config push to {state.friendly_name} is already in progress"
+            raise HomeAssistantError(msg)
         await self._push_slot_config(state, config)
         self.setup_light_tracking()
         self.notify_listeners()
@@ -1237,6 +1286,10 @@ class Control4Manager:
             LOGGER.error("Cannot audit unknown device: %s", ieee)
             return None
         mode = mode if mode in AUDIT_MODES else self.audit_mode
+        # Only the pass that raised the flag may lower it. A manual
+        # audit_config that runs while a sweep pass is in flight must not
+        # clear the sweep's flag, or the next tick would overlap it.
+        owns_running_flag = not self._audit_running
         self._audit_running = True
         started = dt_util.utcnow()
         self._audit_attempts[ieee] = started
@@ -1285,7 +1338,8 @@ class Control4Manager:
         except Exception:  # noqa: BLE001
             LOGGER.exception("Audit pass errored for %s", state.friendly_name)
         finally:
-            self._audit_running = False
+            if owns_running_flag:
+                self._audit_running = False
         summary["finished"] = dt_util.utcnow().isoformat()
         self._audit_summaries[ieee] = summary
         LOGGER.info(
@@ -1614,9 +1668,20 @@ class Control4Manager:
         return entity_id
 
     async def press_button(
-        self, ieee: str, slot_id: int, event_type: str = "pressed"
+        self,
+        ieee: str,
+        slot_id: int,
+        event_type: str = "pressed",
+        context: Context | None = None,
     ) -> None:
-        """Handle a button press — firmware load control or software action."""
+        """
+        Handle a button press: firmware load control or software action.
+
+        context is passed to every service call the press makes. For a
+        press_button service call it is the caller's context, so Home
+        Assistant applies that user's permissions to the bound action; for
+        a physical press it is the integration context of that press.
+        """
         config = self._store.get_device(ieee)
         slot = self._find_slot(config, slot_id) if config else None
         behavior = slot.behavior if slot else "keypad"
@@ -1630,7 +1695,7 @@ class Control4Manager:
                     "toggle_load": "toggle",
                 }[behavior]
                 await self._hass.services.async_call(
-                    "light", svc, {"entity_id": light_entity}
+                    "light", svc, {"entity_id": light_entity}, context=context
                 )
             else:
                 # No HA light entity matches this device's friendly
@@ -1657,10 +1722,14 @@ class Control4Manager:
                 "triple_tap": "triple_tap",
                 "hold": "hold",
             }.get(event_type, "tap")
-            await self.execute_slot_action(ieee, slot_id, trigger)
+            await self.execute_slot_action(ieee, slot_id, trigger, context=context)
 
     async def execute_slot_action(
-        self, ieee: str, slot_id: int, trigger: str = "tap"
+        self,
+        ieee: str,
+        slot_id: int,
+        trigger: str = "tap",
+        context: Context | None = None,
     ) -> None:
         """
         Execute the HA-native action dict for a slot.
@@ -1683,23 +1752,34 @@ class Control4Manager:
         action = action_map.get(trigger)
         if not action:
             return
+        if not isinstance(action, dict):
+            LOGGER.error("Invalid %s action for slot %s: %r", trigger, slot_id, action)
+            return
 
         service = action.get("action", "")
-        if "." not in service:
-            LOGGER.error("Invalid action service: %s", service)
+        if not isinstance(service, str) or "." not in service:
+            LOGGER.error("Invalid action service: %r", service)
+            return
+        target = action.get("target") or {}
+        data = action.get("data") or {}
+        if not isinstance(target, dict) or not isinstance(data, dict):
+            LOGGER.error(
+                "Invalid target or data in %s action for slot %s", trigger, slot_id
+            )
             return
 
         domain, svc_name = service.split(".", 1)
-        target = action.get("target", {})
         entity_id = self._resolve_entity_id(ieee, target.get("entity_id", ""))
 
         if slot.led_track_entity_id:
             await self.async_optimistic_led(ieee, slot_id)
 
-        service_data = dict(action.get("data", {}))
+        service_data = dict(data)
         if entity_id:
             service_data["entity_id"] = entity_id
-        await self._hass.services.async_call(domain, svc_name, service_data)
+        await self._hass.services.async_call(
+            domain, svc_name, service_data, context=context
+        )
 
     async def async_optimistic_led(self, ieee: str, slot_id: int) -> None:
         """
@@ -1948,11 +2028,15 @@ class Control4Manager:
         )
 
     async def _press_button_task(
-        self, ieee: str, slot_id: int, event_type: str
+        self,
+        ieee: str,
+        slot_id: int,
+        event_type: str,
+        context: Context | None = None,
     ) -> None:
-        """Run press_button from a fire-and-forget task; log a failed publish."""
+        """Run press_button from a fire-and-forget task; log any failure."""
         try:
-            await self.press_button(ieee, slot_id, event_type)
+            await self.press_button(ieee, slot_id, event_type, context=context)
         except HomeAssistantError as err:
             state = self._devices.get(ieee)
             LOGGER.warning(
@@ -1961,6 +2045,18 @@ class Control4Manager:
                 slot_id,
                 event_type,
                 err,
+            )
+        except Exception:  # noqa: BLE001
+            # Nothing awaits this task, so an unexpected error (a bad stored
+            # action, a service that raises something other than a
+            # HomeAssistantError) would otherwise surface only as "Task
+            # exception was never retrieved".
+            state = self._devices.get(ieee)
+            LOGGER.exception(
+                "Button action for %s slot %s (%s) errored",
+                state.friendly_name if state else ieee,
+                slot_id,
+                event_type,
             )
 
     async def async_try_send_mqtt(
@@ -2077,6 +2173,22 @@ def _click_count_to_event_type(count: int) -> str:
     range instead.
     """
     return _CLICK_COUNT_MAP[min(max(count, 1), max(_CLICK_COUNT_MAP))]
+
+
+_ACTION_FIELDS = ("tap_action", "double_tap_action", "hold_action")
+
+
+def _strip_action_data(config_dict: dict[str, Any]) -> dict[str, Any]:
+    """Return a device config dict with every slot action's data removed."""
+    slots = []
+    for slot in config_dict.get("slots", []):
+        slot_copy = dict(slot)
+        for field in _ACTION_FIELDS:
+            action = slot_copy.get(field)
+            if isinstance(action, dict) and "data" in action:
+                slot_copy[field] = {k: v for k, v in action.items() if k != "data"}
+        slots.append(slot_copy)
+    return {**config_dict, "slots": slots}
 
 
 def _color_eq(a: str, b: str) -> bool:

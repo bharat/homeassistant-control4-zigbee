@@ -458,6 +458,16 @@ that belongs to the device, such as its sensor anchor or one of its
 button event entities) or `ieee_address` (the raw Zigbee address).
 Provide exactly one.
 
+Services that change a device's stored configuration or write to its
+firmware (`set_device_config`, `set_slot`, `set_device_type`,
+`set_led`, `set_slot_led`, `push_config`, `audit_config`,
+`send_raw_command`, `snapshot`, `restore`, `delete_snapshot`) are
+limited to administrators. `press_button` is open to every user, but
+it runs the button's action with that user's permissions: the user
+must be allowed to control the button's event entity, and an action
+that targets an entity they can't control or calls an admin-only
+service is refused. Physical presses are unaffected.
+
 ### `control4_dimmers.set_device_config`
 
 Apply a full device configuration in one call. This is the primary

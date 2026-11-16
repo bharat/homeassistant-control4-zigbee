@@ -476,6 +476,36 @@ class TestSetSlot:
         with pytest.raises(ServiceValidationError):
             await _svc_set_slot(mock_hass, call)
 
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "action",
+        [
+            {"action": "not a service"},
+            {"action": 5},
+            {"action": "light.toggle", "target": "light.x"},
+            {"action": "light.toggle", "target": ["light.x"]},
+            {"action": "light.toggle", "data": "brightness"},
+            {"action": "light.toggle", "service": "light.toggle"},
+        ],
+    )
+    async def test_malformed_action_rejected(
+        self, mock_hass: MagicMock, action: dict[str, Any]
+    ) -> None:
+        _make_runtime(mock_hass, config=_keypad_config())
+        call = _call({"ieee_address": IEEE, "slot_id": 1, "tap_action": action})
+        with pytest.raises(ServiceValidationError):
+            await _svc_set_slot(mock_hass, call)
+
+    @pytest.mark.asyncio
+    async def test_service_key_is_stored_as_action(self, mock_hass: MagicMock) -> None:
+        """The legacy "service" spelling is translated, so the action runs."""
+        _, store = _make_runtime(mock_hass, config=_keypad_config())
+        action = {"service": "script.movie", "data": {"x": 1}}
+        call = _call({"ieee_address": IEEE, "slot_id": 1, "tap_action": action})
+        await _svc_set_slot(mock_hass, call)
+        slot1 = next(s for s in store.get_device(IEEE).slots if s.slot_id == 1)
+        assert slot1.tap_action == {"action": "script.movie", "data": {"x": 1}}
+
 
 # ── push_config ──────────────────────────────────────────────────────
 

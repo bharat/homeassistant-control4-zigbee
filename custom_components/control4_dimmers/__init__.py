@@ -6,10 +6,15 @@ import re
 from typing import TYPE_CHECKING, Any
 
 import voluptuous as vol
+from homeassistant.auth.permissions.const import POLICY_CONTROL
 from homeassistant.components import websocket_api
 from homeassistant.const import EVENT_HOMEASSISTANT_STARTED, Platform
 from homeassistant.core import CoreState, Event, ServiceCall, SupportsResponse
-from homeassistant.exceptions import ServiceValidationError
+from homeassistant.exceptions import (
+    ServiceValidationError,
+    Unauthorized,
+    UnknownUser,
+)
 from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers.service import async_register_admin_service
 
@@ -64,6 +69,20 @@ def _hex_color(value: Any) -> str:
     return stripped.lower()
 
 
+# One stored slot action, in the shape execute_slot_action runs: a
+# domain.service name plus an optional target and data mapping. Other keys
+# (the "metadata" Home Assistant's action selector adds) are kept but
+# ignored at execution time.
+_ACTION_SCHEMA = vol.Schema(
+    {
+        vol.Required("action"): cv.service,
+        vol.Optional("target"): vol.Any(None, dict),
+        vol.Optional("data"): vol.Any(None, dict),
+    },
+    extra=vol.ALLOW_EXTRA,
+)
+
+
 def _action_field(value: Any) -> Any:
     """Validate an action field: the self-load sentinel or an action dict."""
     if value == SELF_LOAD_SENTINEL:
@@ -71,10 +90,15 @@ def _action_field(value: Any) -> Any:
     if not isinstance(value, dict):
         msg = "action must be a mapping or the '__self_load__' sentinel"
         raise vol.Invalid(msg)
-    if "action" not in value and "service" not in value:
-        msg = "action mapping must include an 'action' or 'service' key"
-        raise vol.Invalid(msg)
-    return value
+    if "service" in value:
+        # Older Home Assistant scripts spell the key "service". Execution
+        # only reads "action", so translate it rather than store an action
+        # that would silently never run.
+        if "action" in value:
+            msg = "action mapping must not include both 'action' and 'service'"
+            raise vol.Invalid(msg)
+        value = {("action" if k == "service" else k): v for k, v in value.items()}
+    return _ACTION_SCHEMA(value)
 
 
 # Strict per-slot validation, shared by set_device_config and set_slot.
@@ -219,7 +243,12 @@ async def _ws_get_devices(
     if runtime is None:
         connection.send_result(msg["id"], [])
         return
-    connection.send_result(msg["id"], runtime["manager"].get_all_devices_info())
+    connection.send_result(
+        msg["id"],
+        runtime["manager"].get_all_devices_info(
+            include_action_data=connection.user.is_admin
+        ),
+    )
 
 
 @websocket_api.websocket_command(
@@ -307,7 +336,7 @@ async def _ws_device_by_entity(
         connection.send_error(msg["id"], "not_loaded", "Integration not loaded")
         return
     manager: Control4Manager = runtime["manager"]
-    info = manager.get_device_info(ieee)
+    info = manager.get_device_info(ieee, include_action_data=connection.user.is_admin)
     if info is None:
         connection.send_error(msg["id"], "not_found", "Device not discovered")
         return
@@ -412,8 +441,26 @@ async def _svc_press_button(hass: HomeAssistant, call: ServiceCall) -> None:
     For load-control buttons (load_on, load_off, toggle_load), controls
     the dimmer load via the Z2M light entity.  For programmable buttons,
     executes the tap_action.
+
+    The press runs with the caller's context, so Home Assistant checks the
+    caller's permissions on whatever the bound action targets. A caller
+    with a user must also be allowed to control the button's own entity.
     """
     entity_id = call.data["entity_id"]
+    if call.context.user_id:
+        user = await hass.auth.async_get_user(call.context.user_id)
+        if user is None:
+            raise UnknownUser(
+                context=call.context,
+                entity_id=entity_id,
+                permission=POLICY_CONTROL,
+            )
+        if not user.permissions.check_entity(entity_id, POLICY_CONTROL):
+            raise Unauthorized(
+                context=call.context,
+                entity_id=entity_id,
+                permission=POLICY_CONTROL,
+            )
     state = hass.states.get(entity_id)
     if state is None:
         LOGGER.error("press_button: entity not found: %s", entity_id)
@@ -437,8 +484,8 @@ async def _svc_press_button(hass: HomeAssistant, call: ServiceCall) -> None:
 
     event_type = call.data.get("event_type", "pressed")
     manager: Control4Manager = runtime["manager"]
-    manager.fire_button_event(ieee, slot_id, event_type)
-    await manager.press_button(ieee, slot_id, event_type)
+    manager.fire_button_event(ieee, slot_id, event_type, call.context)
+    await manager.press_button(ieee, slot_id, event_type, context=call.context)
 
 
 async def _svc_send_raw_command(hass: HomeAssistant, call: ServiceCall) -> None:
@@ -838,7 +885,12 @@ async def _register_services(hass: HomeAssistant) -> None:
     async def _wrap_delete_snapshot(call: ServiceCall) -> dict[str, Any]:
         return await _svc_delete_snapshot(hass, call)
 
-    hass.services.async_register(
+    # set_led and set_slot_led persist configuration and write firmware;
+    # push_config and audit_config can overwrite firmware and queue many
+    # mesh writes. All four are limited to administrators. press_button
+    # stays open but runs with the caller's permissions.
+    async_register_admin_service(
+        hass,
         DOMAIN,
         "set_led",
         _wrap_set_led,
@@ -878,7 +930,8 @@ async def _register_services(hass: HomeAssistant) -> None:
         ),
     )
 
-    hass.services.async_register(
+    async_register_admin_service(
+        hass,
         DOMAIN,
         "set_slot_led",
         _wrap_set_slot_led,
@@ -952,7 +1005,8 @@ async def _register_services(hass: HomeAssistant) -> None:
         supports_response=SupportsResponse.OPTIONAL,
     )
 
-    hass.services.async_register(
+    async_register_admin_service(
+        hass,
         DOMAIN,
         "push_config",
         _wrap_push_config,
@@ -965,7 +1019,8 @@ async def _register_services(hass: HomeAssistant) -> None:
         supports_response=SupportsResponse.OPTIONAL,
     )
 
-    hass.services.async_register(
+    async_register_admin_service(
+        hass,
         DOMAIN,
         "audit_config",
         _wrap_audit_config,
