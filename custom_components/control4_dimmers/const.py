@@ -13,7 +13,9 @@ LOGGER: Logger = getLogger(__package__)
 DOMAIN: Final = "control4_dimmers"
 
 MANIFEST_PATH = Path(__file__).parent / "manifest.json"
-FRONTEND_CARD_PATH = Path(__file__).parent / "frontend" / "control4-dimmer-card.js"
+FRONTEND_CARD_PATH = (
+    Path(__file__).parent / "frontend" / "www" / "control4-dimmer-card.js"
+)
 
 with MANIFEST_PATH.open(encoding="utf-8") as _manifest_file:
     _version = json.load(_manifest_file).get("version", "0.0.0")
@@ -61,6 +63,11 @@ DRIFT_LAYER_BOTH: Final = "both"
 STORAGE_KEY: Final = "control4_dimmers_devices"
 SNAPSHOT_STORAGE_KEY: Final = "control4_dimmers_snapshots"
 STORAGE_VERSION: Final = 1
+# Minor bumps are backward compatible: an older release still reads the
+# file (Home Assistant only refuses a newer major version), so rolling back
+# never strands a user's stored config. 1.2 validates stored values on load
+# (colors, slot ids and sizes, types); see store.sanitize_device_config.
+STORAGE_MINOR_VERSION: Final = 2
 
 C4_MANUFACTURER_NAME: Final = "Control4"
 

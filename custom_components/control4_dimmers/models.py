@@ -211,6 +211,13 @@ class DeviceState:
                 self.button_configs.setdefault(btn, {})["led_mode"] = payload[mode_key]
 
 
+def valid_hex(value: Any) -> str | None:
+    """Return a color as lowercase six-digit hex without "#", or None."""
+    if isinstance(value, str) and _HEX6_RE.fullmatch(value):
+        return value.lstrip("#").lower()
+    return None
+
+
 def _is_finite_number(value: Any) -> bool:
     """Return whether value is an int or float (not a bool) and finite."""
     if isinstance(value, bool) or not isinstance(value, (int, float)):
@@ -221,7 +228,7 @@ def _is_finite_number(value: Any) -> bool:
 def _clean_color(value: Any) -> str | None:
     """Return a payload color as lowercase six-digit hex, or None if invalid."""
     if isinstance(value, str):
-        return value.lstrip("#").lower() if _HEX6_RE.fullmatch(value) else None
+        return valid_hex(value)
     if isinstance(value, dict):
         hue = value.get("hue", 0)
         sat = value.get("saturation", 0)

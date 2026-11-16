@@ -38,8 +38,8 @@ The two halves communicate ONLY over MQTT, via a frozen contract (see below). No
 │   ├── event.py                # One Control4ButtonEvent entity per button slot
 │   ├── brand/                  # HACS brand icons (ship in-repo since HA 2026.3.0)
 │   ├── frontend/
-│   │   ├── __init__.py         # Serves the Lovelace card as a JS module
-│   │   └── control4-dimmer-card.js  # LitElement; dashboard + chassis editor (~1500 LOC)
+│   │   ├── __init__.py         # Serves www/ (only) at /control4_dimmers and registers the Lovelace resource
+│   │   └── www/control4-dimmer-card.js  # LitElement; dashboard + chassis editor (~2200 LOC)
 │   └── services.yaml           # set_device_config, set_slot, push_config, set_led, set_slot_led, press_button, send_raw_command, set_device_type, snapshot/restore
 │
 ├── tests/                      # HA component tests (pytest + pytest-homeassistant-custom-component)
@@ -96,7 +96,8 @@ This integration and the Zigbee-side definition are separate codebases coupled o
 - **The MQTT boundary is non-negotiable.** Protocol logic lives on the Zigbee side; nothing in `custom_components/` should know what hex bytes a C4 command uses (composing `c4.dmx.*` ASCII command strings is the ceiling).
 - **Manifest version is `"0.0.0"` in source on purpose.** The release workflow writes the real version into the HACS zip it builds. Don't bump it manually -- Releases section explains.
 - **`PLATFORMS = [Platform.EVENT, Platform.NUMBER, Platform.SENSOR, Platform.SWITCH]` only** -- the integration deliberately doesn't register a `light` platform; it reuses Z2M's native light entity via MQTT. Don't add `light.py` to `PLATFORMS`. The `switch` platform exists only for relay-only hardware (the `switch` device type, C4-SW120277, issue #189), where Z2M's light entity would show a brightness slider the hardware cannot honor. The `number` platform holds the dimming table settings (`c4_tv_*`), created only where `Control4Manager.has_dimming_table()` is true (dimmers and keypad dimmers, never relays, keypads or the outlet).
-- **Per-device persistent state lives in `.storage/control4_dimmers_devices.<entry_id>`.** Schema changes require bumping `STORAGE_VERSION` in `const.py` and writing a migration in `store.py`.
+- **Per-device persistent state lives in `.storage/control4_dimmers_devices.<entry_id>`.** Schema changes require a version bump in `const.py` and a migration in `store.py`. Prefer `STORAGE_MINOR_VERSION` for changes an older release can still read: Home Assistant refuses a newer *major* version, so a major bump makes rolling back to an older commit fail to load the integration. Every load runs stored values through `store.sanitize_device_config`.
+- **Only `frontend/www/` is served** (at `/control4_dimmers/`). Anything placed there is public without authentication; keep it to the card.
 - **Pre-commit runs pytest with a 15s/test timeout.** Long-running tests should be marked `@pytest.mark.slow` or split.
 - **`scripts/led-*.json`** are hand-crafted protocol reverse-engineering artifacts, kept as the lab notebook behind RESEARCH.md. Not test data; don't run in CI.
 

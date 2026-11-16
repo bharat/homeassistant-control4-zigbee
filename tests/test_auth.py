@@ -18,6 +18,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 from homeassistant.core import Context, HomeAssistant, ServiceCall
 from homeassistant.exceptions import Unauthorized
+from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.service import async_register_admin_service
 from pytest_homeassistant_custom_component.common import async_mock_service
 
@@ -37,6 +38,19 @@ from custom_components.control4_dimmers.store import Control4Store
 IEEE = "0x000fff0000ccc001"
 ENTITY_ID = "sensor.theater"
 EVENT_ID = "event.theater_button_1"
+
+
+def _register_entities(hass: HomeAssistant) -> None:
+    """Register the device's anchor sensor and button 1 as our entities."""
+    ent_reg = er.async_get(hass)
+    ent_reg.async_get_or_create(
+        "sensor", DOMAIN, f"{IEEE}_sensor", suggested_object_id="theater"
+    )
+    ent_reg.async_get_or_create(
+        "event", DOMAIN, f"{IEEE}_event_1", suggested_object_id="theater_button_1"
+    )
+    assert ent_reg.async_get(ENTITY_ID) is not None
+    assert ent_reg.async_get(EVENT_ID) is not None
 
 
 @pytest.fixture
@@ -61,7 +75,8 @@ def manager(hass: HomeAssistant) -> MagicMock:
     mgr.async_push_config.return_value = True
     mgr.async_audit_device.return_value = {"ok": True}
     hass.data[DOMAIN] = {"entry1": {"manager": mgr}}
-    hass.states.async_set(ENTITY_ID, "keypad", {"ieee_address": IEEE, "slot_id": 1})
+    _register_entities(hass)
+    hass.states.async_set(ENTITY_ID, "keypad", {"ieee_address": IEEE})
     return mgr
 
 
@@ -145,8 +160,8 @@ SVC_ADMIN_ONLY: list[tuple[str, dict[str, Any]]] = [
     ("snapshot", {"ieee_address": IEEE, "name": "before"}),
     ("restore", {"ieee_address": IEEE, "name": "before"}),
     ("delete_snapshot", {"ieee_address": IEEE, "name": "before"}),
-    ("set_led", {"entity_id": ENTITY_ID, "mode": "on", "color": "ff0000"}),
-    ("set_slot_led", {"entity_id": ENTITY_ID, "on_color": "ff0000"}),
+    ("set_led", {"entity_id": EVENT_ID, "mode": "on", "color": "ff0000"}),
+    ("set_slot_led", {"entity_id": EVENT_ID, "on_color": "ff0000"}),
     ("push_config", {"ieee_address": IEEE}),
     ("audit_config", {"ieee_address": IEEE, "mode": "heal"}),
 ]
@@ -335,6 +350,7 @@ def live_manager(hass: HomeAssistant) -> Control4Manager:
         ],
     )
     hass.data[DOMAIN] = {"entry1": {"manager": mgr}}
+    _register_entities(hass)
     hass.states.async_set(EVENT_ID, "unknown", {"ieee_address": IEEE, "slot_id": 1})
     return mgr
 
@@ -473,3 +489,30 @@ async def test_ws_action_data_visible_only_to_admin(  # noqa: PLR0913, PLR0917
     # The stored config itself is untouched.
     stored = live_manager.store.get_device(IEEE).slots[0].tap_action
     assert stored["data"] == {"code": "1234"}
+
+
+# ── only this integration's entities resolve to a device ─────────────
+
+
+async def test_foreign_entity_with_ieee_attribute_is_refused(
+    hass: HomeAssistant,
+    hass_admin_user,
+    live_manager: Control4Manager,
+    recorded: list[ServiceCall],
+) -> None:
+    """An MQTT discovery entity carrying our attributes cannot press a button."""
+    er.async_get(hass).async_get_or_create(
+        "event", "mqtt", "forged", suggested_object_id="forged_button"
+    )
+    hass.states.async_set(
+        "event.forged_button", "unknown", {"ieee_address": IEEE, "slot_id": 1}
+    )
+    await _register_services(hass)
+    await hass.services.async_call(
+        DOMAIN,
+        "press_button",
+        {"entity_id": "event.forged_button"},
+        blocking=True,
+        context=Context(user_id=hass_admin_user.id),
+    )
+    assert recorded == []

@@ -13,6 +13,9 @@ from ..const import JSMODULES, URL_BASE
 if TYPE_CHECKING:
     from homeassistant.core import HomeAssistant
 
+# The only directory served to browsers.
+WWW_DIR = Path(__file__).parent / "www"
+
 
 class JSModuleRegistration:
     """Register Control4 Dimmers frontend resources."""
@@ -29,10 +32,17 @@ class JSModuleRegistration:
             await self._async_wait_for_lovelace_resources()
 
     async def _async_register_path(self) -> None:
-        """Register the static HTTP path for frontend assets."""
+        """
+        Register the static HTTP path for the card.
+
+        Only the www/ subdirectory is served, so the card is the only file
+        reachable under URL_BASE (not this module or its bytecode). The
+        card's URL is unchanged, so existing Lovelace resources keep
+        working.
+        """
         try:
             await self.hass.http.async_register_static_paths(
-                [StaticPathConfig(URL_BASE, Path(__file__).parent, cache_headers=False)]
+                [StaticPathConfig(URL_BASE, str(WWW_DIR), cache_headers=False)]
             )
         except RuntimeError:
             return

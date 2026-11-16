@@ -24,6 +24,8 @@ from custom_components.control4_dimmers.models import (
 )
 from custom_components.control4_dimmers.store import Control4Store
 
+from .conftest import fake_entity_registry
+
 IEEE_A = "0x000fff0000aaa001"
 IEEE_B = "0x000fff0000bbb002"
 
@@ -119,6 +121,9 @@ class TestSameDevicePacing:
             return _entity_state(IEEE_A, slot_id)
 
         mock_hass.states.get.side_effect = _state_for
+        ent_reg = fake_entity_registry(mock_hass)
+        ent_reg.add("event.theater_1", f"{IEEE_A}_event_1")
+        ent_reg.add("event.theater_2", f"{IEEE_A}_event_2")
 
         call_1 = MagicMock()
         call_1.data = {"entity_id": "event.theater_1", "on_color": "00ff00"}

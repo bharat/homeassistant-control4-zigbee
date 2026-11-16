@@ -29,6 +29,8 @@ from custom_components.control4_dimmers.models import (
 )
 from custom_components.control4_dimmers.store import Control4Store
 
+from .conftest import fake_entity_registry
+
 IEEE = "0x000fff0000ccc001"
 
 
@@ -58,6 +60,9 @@ def _make_runtime(
     mgr._push_slot_config = AsyncMock()
     mock_hass.data = {DOMAIN: {"entry1": {"manager": mgr, "store": store}}}
     mock_hass.states.async_all.return_value = []
+    ent_reg = fake_entity_registry(mock_hass)
+    ent_reg.add("sensor.theater", f"{IEEE}_sensor")
+    ent_reg.add("event.theater_button_1", f"{IEEE}_event_1")
     return mgr, store
 
 
@@ -187,7 +192,7 @@ class TestSetDeviceType:
     ) -> None:
         mgr, store = _make_runtime(mock_hass, config=None)
         mock_hass.states.get.return_value = _entity_state(IEEE)
-        call = _call({"entity_id": "light.theater", "device_type": "dimmer"})
+        call = _call({"entity_id": "sensor.theater", "device_type": "dimmer"})
         await _svc_set_device_type(mock_hass, call)
         config = store.get_device(IEEE)
         assert config is not None
@@ -570,6 +575,17 @@ class TestDeviceResolution:
         call = _call({"ieee_address": "0xdeadbeef"})
         with pytest.raises(ServiceValidationError):
             await _svc_push_config(mock_hass, call)
+
+    @pytest.mark.asyncio
+    async def test_foreign_entity_errors(self, mock_hass: MagicMock) -> None:
+        """Another integration's entity with our attributes does not resolve."""
+        _make_runtime(mock_hass, config=_keypad_config())
+        fake_entity_registry(mock_hass).add(
+            "sensor.forged", f"{IEEE}_sensor", platform="mqtt"
+        )
+        mock_hass.states.get.return_value = _entity_state(IEEE)
+        with pytest.raises(ServiceValidationError):
+            await _svc_push_config(mock_hass, _call({"entity_id": "sensor.forged"}))
 
     @pytest.mark.asyncio
     async def test_entity_without_ieee_errors(self, mock_hass: MagicMock) -> None:
