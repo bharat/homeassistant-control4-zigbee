@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import ANY, AsyncMock, MagicMock, patch
 
 import pytest
 from homeassistant.exceptions import HomeAssistantError
@@ -171,7 +171,7 @@ class TestManagerEventCallbacks:
         cb = MagicMock()
         manager.register_event_callback(IEEE_DIMMER, 2, cb)
         manager._dispatch_button_action(dimmer_state, "button_2_press")
-        cb.assert_called_once_with("pressed")
+        cb.assert_called_once_with("pressed", ANY)
 
     def test_release_action_dispatch(
         self, manager: Control4Manager, dimmer_state: DeviceState
@@ -180,7 +180,7 @@ class TestManagerEventCallbacks:
         cb = MagicMock()
         manager.register_event_callback(IEEE_DIMMER, 2, cb)
         manager._dispatch_button_action(dimmer_state, "button_2_release")
-        cb.assert_called_once_with("released")
+        cb.assert_called_once_with("released", ANY)
 
     def test_click_action_dispatch(
         self, manager: Control4Manager, dimmer_state: DeviceState
@@ -189,7 +189,7 @@ class TestManagerEventCallbacks:
         cb = MagicMock()
         manager.register_event_callback(IEEE_DIMMER, 2, cb)
         manager._dispatch_button_action(dimmer_state, "button_2_click_2")
-        cb.assert_called_once_with("double_tap")
+        cb.assert_called_once_with("double_tap", ANY)
 
     def test_dimmer_bottom_button_maps_to_bottom_slot(
         self, manager: Control4Manager, dimmer_state: DeviceState
@@ -236,7 +236,7 @@ class TestManagerEventCallbacks:
         cb = MagicMock()
         manager.register_event_callback(IEEE_DIMMER, slot_id, cb)
         manager._dispatch_button_action(dimmer_state, f"button_{button}_press")
-        cb.assert_called_once_with("pressed")
+        cb.assert_called_once_with("pressed", ANY)
 
     @pytest.mark.parametrize("button", [7, 8, 9])
     def test_out_of_range_buttons_not_remapped(
@@ -265,7 +265,7 @@ class TestManagerEventCallbacks:
         cb = MagicMock()
         manager.register_event_callback(IEEE_DIMMER, 6, cb)
         manager._dispatch_button_action(dimmer_state, "button_6_press")
-        cb.assert_called_once_with("pressed")
+        cb.assert_called_once_with("pressed", ANY)
 
     def test_keypad_button_6_not_remapped(
         self, manager: Control4Manager, keypad_state: DeviceState
@@ -274,7 +274,7 @@ class TestManagerEventCallbacks:
         cb = MagicMock()
         manager.register_event_callback(keypad_state.ieee_address, 6, cb)
         manager._dispatch_button_action(keypad_state, "button_6_release")
-        cb.assert_called_once_with("released")
+        cb.assert_called_once_with("released", ANY)
 
     def test_unsubscribe_event_callback(
         self, manager: Control4Manager, dimmer_state: DeviceState
@@ -301,7 +301,7 @@ class TestManagerEventCallbacks:
         cb = MagicMock()
         manager.register_event_callback(IEEE_DIMMER, "paddle_up", cb)
         manager._dispatch_button_action(dimmer_state, "paddle_up_press")
-        cb.assert_called_once_with("pressed")
+        cb.assert_called_once_with("pressed", ANY)
 
     def test_paddle_down_scene_dispatch(
         self, manager: Control4Manager, dimmer_state: DeviceState
@@ -310,7 +310,7 @@ class TestManagerEventCallbacks:
         cb = MagicMock()
         manager.register_event_callback(IEEE_DIMMER, "paddle_down", cb)
         manager._dispatch_button_action(dimmer_state, "paddle_down_scene")
-        cb.assert_called_once_with("pressed")
+        cb.assert_called_once_with("pressed", ANY)
 
     def test_paddle_click_dispatch(
         self, manager: Control4Manager, dimmer_state: DeviceState
@@ -319,7 +319,7 @@ class TestManagerEventCallbacks:
         cb = MagicMock()
         manager.register_event_callback(IEEE_DIMMER, "paddle_up", cb)
         manager._dispatch_button_action(dimmer_state, "paddle_up_click_2")
-        cb.assert_called_once_with("double_tap")
+        cb.assert_called_once_with("double_tap", ANY)
 
     def test_button_click_4_clamps_to_triple_tap(
         self, manager: Control4Manager, dimmer_state: DeviceState
@@ -329,7 +329,7 @@ class TestManagerEventCallbacks:
         cb = MagicMock()
         manager.register_event_callback(IEEE_DIMMER, 2, cb)
         manager._dispatch_button_action(dimmer_state, "button_2_click_4")
-        cb.assert_called_once_with("triple_tap")
+        cb.assert_called_once_with("triple_tap", ANY)
 
     def test_paddle_click_4_clamps_to_triple_tap(
         self, manager: Control4Manager, dimmer_state: DeviceState
@@ -339,7 +339,7 @@ class TestManagerEventCallbacks:
         cb = MagicMock()
         manager.register_event_callback(IEEE_DIMMER, "paddle_down", cb)
         manager._dispatch_button_action(dimmer_state, "paddle_down_click_4")
-        cb.assert_called_once_with("triple_tap")
+        cb.assert_called_once_with("triple_tap", ANY)
 
     def test_fire_button_event_drops_undeclared_type(
         self, manager: Control4Manager, dimmer_state: DeviceState
@@ -381,7 +381,7 @@ class TestManagerEventCallbacks:
         manager.register_event_callback(IEEE_DIMMER, 2, cb)
         manager._dispatch_button_action(dimmer_state, "button_2_scene")
         manager._dispatch_button_action(dimmer_state, "button_2_press")
-        cb.assert_called_once_with("pressed")
+        cb.assert_called_once_with("pressed", ANY)
 
     def test_double_tap_fires_pressed_per_tap(
         self, manager: Control4Manager, dimmer_state: DeviceState
@@ -435,8 +435,8 @@ class TestManagerEventCallbacks:
         manager.register_event_callback(IEEE_DIMMER, 5, cb5)
         manager._dispatch_button_action(dimmer_state, "button_2_press")
         manager._dispatch_button_action(dimmer_state, "button_6_scene")
-        cb2.assert_called_once_with("pressed")
-        cb5.assert_called_once_with("pressed")
+        cb2.assert_called_once_with("pressed", ANY)
+        cb5.assert_called_once_with("pressed", ANY)
 
     def test_remapped_press_scene_pair_fires_pressed_once(
         self, manager: Control4Manager, dimmer_state: DeviceState
@@ -447,7 +447,7 @@ class TestManagerEventCallbacks:
         manager.register_event_callback(IEEE_DIMMER, 5, cb)
         manager._dispatch_button_action(dimmer_state, "button_6_press")
         manager._dispatch_button_action(dimmer_state, "button_6_scene")
-        cb.assert_called_once_with("pressed")
+        cb.assert_called_once_with("pressed", ANY)
 
     def test_paddle_press_scene_pair_fires_pressed_once(
         self, manager: Control4Manager, dimmer_state: DeviceState
@@ -458,7 +458,7 @@ class TestManagerEventCallbacks:
         manager.register_event_callback(IEEE_DIMMER, "paddle_up", cb)
         manager._dispatch_button_action(dimmer_state, "paddle_up_press")
         manager._dispatch_button_action(dimmer_state, "paddle_up_scene")
-        cb.assert_called_once_with("pressed")
+        cb.assert_called_once_with("pressed", ANY)
 
 
 # ── Manager: bridge device handling ──────────────────────────────────
@@ -602,7 +602,7 @@ class TestManagerDeviceState:
             {"action": "button_2_press"},
         )
         await manager._handle_device_state(msg)
-        cb.assert_called_once_with("pressed")
+        cb.assert_called_once_with("pressed", ANY)
 
     @pytest.mark.asyncio
     async def test_detect_result_refines_relay_to_switch(
@@ -1012,7 +1012,7 @@ class TestExecuteSlotAction:
         manager._hass.services.async_call = AsyncMock()
         await manager.execute_slot_action(IEEE_DIMMER, 2, "tap")
         manager._hass.services.async_call.assert_awaited_once_with(
-            "light", "toggle", {"entity_id": "light.kitchen"}
+            "light", "toggle", {"entity_id": "light.kitchen"}, context=None
         )
 
     @pytest.mark.asyncio
@@ -1038,7 +1038,7 @@ class TestExecuteSlotAction:
         manager._hass.services.async_call = AsyncMock()
         await manager.execute_slot_action(IEEE_DIMMER, 2, "tap")
         manager._hass.services.async_call.assert_awaited_once_with(
-            "light", "turn_on", {"entity_id": "light.kitchen"}
+            "light", "turn_on", {"entity_id": "light.kitchen"}, context=None
         )
 
     @pytest.mark.asyncio
@@ -1068,7 +1068,7 @@ class TestExecuteSlotAction:
         manager._hass.services.async_call = AsyncMock()
         await manager.execute_slot_action(IEEE_DIMMER, 2, "tap")
         manager._hass.services.async_call.assert_awaited_once_with(
-            "light", "toggle", {"entity_id": "light.kitchen"}
+            "light", "toggle", {"entity_id": "light.kitchen"}, context=None
         )
 
     @pytest.mark.asyncio
@@ -1095,7 +1095,7 @@ class TestExecuteSlotAction:
         manager._hass.services.async_call = AsyncMock()
         await manager.execute_slot_action(IEEE_DIMMER, 2, "double_tap")
         manager._hass.services.async_call.assert_awaited_once_with(
-            "light", "toggle", {"entity_id": "light.bedroom"}
+            "light", "toggle", {"entity_id": "light.bedroom"}, context=None
         )
 
     @pytest.mark.asyncio
@@ -1120,7 +1120,7 @@ class TestExecuteSlotAction:
         manager._hass.services.async_call = AsyncMock()
         await manager.execute_slot_action(IEEE_DIMMER, 2, "double_tap")
         manager._hass.services.async_call.assert_awaited_once_with(
-            "script", "activity_home", {}
+            "script", "activity_home", {}, context=None
         )
 
     @pytest.mark.asyncio
@@ -1407,7 +1407,7 @@ class TestLoadControlBehavior:
         manager._hass.services.async_call = AsyncMock()
         await manager.press_button(IEEE_DIMMER, 2)
         manager._hass.services.async_call.assert_awaited_once_with(
-            "light", "turn_on", {"entity_id": "light.kitchen"}
+            "light", "turn_on", {"entity_id": "light.kitchen"}, context=None
         )
 
     @pytest.mark.asyncio
@@ -1432,7 +1432,7 @@ class TestLoadControlBehavior:
         manager._hass.services.async_call = AsyncMock()
         await manager.press_button(IEEE_DIMMER, 2)
         manager._hass.services.async_call.assert_awaited_once_with(
-            "light", "toggle", {"entity_id": "light.kitchen"}
+            "light", "toggle", {"entity_id": "light.kitchen"}, context=None
         )
 
     @pytest.mark.asyncio
@@ -1469,7 +1469,7 @@ class TestLoadControlBehavior:
         manager._hass.services.async_call = AsyncMock()
         await manager.press_button(IEEE_DIMMER, 1)
         manager._hass.services.async_call.assert_awaited_once_with(
-            "light", svc, {"entity_id": "light.kitchen"}
+            "light", svc, {"entity_id": "light.kitchen"}, context=None
         )
 
     @pytest.mark.asyncio
@@ -1572,7 +1572,7 @@ class TestLoadControlBehavior:
         manager._hass.services.async_call = AsyncMock()
         await manager.press_button(IEEE_DIMMER, 2)
         manager._hass.services.async_call.assert_awaited_once_with(
-            "light", "toggle", {"entity_id": "light.bedroom"}
+            "light", "toggle", {"entity_id": "light.bedroom"}, context=None
         )
 
     @pytest.mark.asyncio
@@ -2215,3 +2215,45 @@ class TestMqttDisconnect:
         ):
             await manager._press_button_task(IEEE_DIMMER, 2, "pressed")
         assert "Button action for Kitchen slot 2 (pressed) failed" in caplog.text
+
+    @pytest.mark.asyncio
+    async def test_button_action_task_logs_unexpected_error(
+        self,
+        manager: Control4Manager,
+        dimmer_state: DeviceState,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        manager._devices[IEEE_DIMMER] = dimmer_state
+        with patch.object(
+            manager, "press_button", new_callable=AsyncMock, side_effect=TypeError("x")
+        ):
+            await manager._press_button_task(IEEE_DIMMER, 2, "pressed")
+        assert "Button action for Kitchen slot 2 (pressed) errored" in caplog.text
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "action",
+        [
+            "__self_load__",
+            {"action": 5},
+            {"action": "light.toggle", "target": "light.x"},
+            {"action": "light.toggle", "data": ["x"]},
+        ],
+    )
+    async def test_malformed_stored_action_is_skipped(
+        self,
+        manager: Control4Manager,
+        dimmer_state: DeviceState,
+        action: Any,
+    ) -> None:
+        """Stored data that skipped validation logs instead of raising."""
+        manager._devices[IEEE_DIMMER] = dimmer_state
+        manager._store._devices[IEEE_DIMMER] = DeviceConfig(
+            ieee_address=IEEE_DIMMER,
+            friendly_name="Kitchen",
+            device_type="dimmer",
+            slots=[SlotConfig(slot_id=2, tap_action=action)],
+        )
+        manager._hass.services.async_call = AsyncMock()
+        await manager.execute_slot_action(IEEE_DIMMER, 2, "tap")
+        manager._hass.services.async_call.assert_not_called()

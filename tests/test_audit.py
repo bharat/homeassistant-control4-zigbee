@@ -14,6 +14,7 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from homeassistant.exceptions import HomeAssistantError
 from homeassistant.util import dt as dt_util
 
 from custom_components.control4_dimmers import _svc_audit_config
@@ -462,6 +463,48 @@ class TestScheduler:
         assert [e for e in fake.events if e[0] == "read"] == [("read", 1), ("read", 2)]
         # Every slot is now verified by the audit, so nothing is a hole.
         assert mgr.get_audit_status()["devices_never_verified"] == 0
+
+    @pytest.mark.asyncio
+    async def test_manual_audit_keeps_running_sweeps_flag(
+        self, mock_hass: MagicMock
+    ) -> None:
+        """A manual pass during a sweep pass must not clear the sweep's flag."""
+        mgr = _build(mock_hass, [IEEE_A], slot_count=1)
+        config = mgr.store.get_device(IEEE_A)
+        fake = _FakeDevice(
+            mgr, IEEE_A, {s.slot_id: _matching_payload(s) for s in config.slots}
+        )
+        mgr._audit_running = True  # a sweep pass is in flight
+        with patch.object(mgr, "async_send_mqtt", new=fake.send):
+            summary = await mgr.async_audit_device(IEEE_A, mode=AUDIT_MODE_REPORT)
+        assert summary is not None
+        assert mgr._audit_running is True
+
+    @pytest.mark.asyncio
+    async def test_audit_clears_its_own_flag(self, mock_hass: MagicMock) -> None:
+        mgr = _build(mock_hass, [IEEE_A], slot_count=1)
+        config = mgr.store.get_device(IEEE_A)
+        fake = _FakeDevice(
+            mgr, IEEE_A, {s.slot_id: _matching_payload(s) for s in config.slots}
+        )
+        with patch.object(mgr, "async_send_mqtt", new=fake.send):
+            await mgr.async_audit_device(IEEE_A)
+        assert mgr._audit_running is False
+
+    @pytest.mark.asyncio
+    async def test_push_rejected_while_push_lock_held(
+        self, mock_hass: MagicMock
+    ) -> None:
+        mgr = _build(mock_hass, [IEEE_A], slot_count=1)
+        send = AsyncMock()
+        with patch.object(mgr, "async_send_mqtt", new=send):
+            lock = mgr._device_lock(mgr._push_locks, IEEE_A)
+            async with lock:
+                with pytest.raises(HomeAssistantError, match="already in progress"):
+                    await mgr.async_push_config(IEEE_A)
+            send.assert_not_called()
+            assert await mgr.async_push_config(IEEE_A) is True
+        send.assert_called()
 
     @pytest.mark.asyncio
     async def test_audit_next_idle_without_devices(self, mock_hass: MagicMock) -> None:

@@ -115,7 +115,7 @@ class TestControl4ButtonEvent:
     def test_on_button_event(self, manager: Control4Manager) -> None:
         entity = self._make_entity(manager)
         entity.async_write_ha_state = MagicMock()
-        entity._on_button_event("pressed")
+        entity._on_button_event("pressed", None)
         entity.async_write_ha_state.assert_called_once()
 
     def test_update_entity_id_on_rename(self, manager: Control4Manager) -> None:
@@ -166,6 +166,29 @@ class TestControl4ButtonEvent:
         assert attrs["led_mode"] == "follow_load"
         assert attrs["ieee_address"] == IEEE_DIMMER
         assert attrs["slot_id"] == 2
+
+    def test_stored_actions_not_exposed(self, manager: Control4Manager) -> None:
+        """Action data can hold secrets; state attributes are world-readable."""
+        manager.store._devices[IEEE_DIMMER] = DeviceConfig(
+            ieee_address=IEEE_DIMMER,
+            friendly_name="Kitchen",
+            device_type="dimmer",
+            slots=[
+                SlotConfig(
+                    slot_id=2,
+                    tap_action={
+                        "action": "alarm_control_panel.alarm_disarm",
+                        "data": {"code": "1234"},
+                    },
+                    double_tap_action={"action": "script.a"},
+                    hold_action={"action": "script.b"},
+                )
+            ],
+        )
+        attrs = self._make_entity(manager, slot_id=2).extra_state_attributes
+        for field in ("tap_action", "double_tap_action", "hold_action"):
+            assert field not in attrs
+        assert "1234" not in repr(attrs)
 
     def test_extra_state_attributes_defaults(self, manager: Control4Manager) -> None:
         entity = self._make_entity(manager, slot_id=3)
@@ -220,7 +243,7 @@ class TestControl4PaddleEvent:
     def test_on_paddle_event(self, manager: Control4Manager) -> None:
         entity = self._make_entity(manager)
         entity.async_write_ha_state = MagicMock()
-        entity._on_paddle_event("pressed")
+        entity._on_paddle_event("pressed", None)
         entity.async_write_ha_state.assert_called_once()
 
 

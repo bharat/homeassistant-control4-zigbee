@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from typing import Any
-from unittest.mock import MagicMock
+from unittest.mock import ANY, MagicMock
 
 import pytest
 from homeassistant.helpers import entity_registry as er
@@ -133,4 +133,4 @@ class TestOutletEntities:
         manager._dispatch_button_action(
             manager.devices[IEEE_OUTLET], "button_1_click_1"
         )
-        cb.assert_called_once_with("single_tap")
+        cb.assert_called_once_with("single_tap", ANY)

@@ -463,7 +463,9 @@ set_led:
 
 press_button:
   name: Press Button
-  description: Simulate a button press on a Control4 device.
+  description: >-
+    Simulate a button press on a Control4 device. The button's action runs
+    with the calling user's permissions.
   fields:
     entity_id:
       name: Button Entity
