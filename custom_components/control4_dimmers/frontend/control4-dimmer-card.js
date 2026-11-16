@@ -22,6 +22,32 @@ const DOMAIN = "control4_dimmers";
 const CARD_TAG = "control4-dimmer-card";
 const EDITOR_TAG = "control4-dimmer-card-editor";
 
+/* ────────────────────── escaping ────────────────────── */
+
+const HTML_ESCAPES = { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" };
+
+/**
+ * Escape a value for interpolation into an HTML string, as text or inside
+ * a quoted attribute. Every innerHTML template below runs values that did
+ * not originate in this file (entity and device names, slot names, icons,
+ * card config strings, error messages) through this.
+ */
+function esc(value) {
+  return String(value ?? "").replace(/[&<>"']/g, (c) => HTML_ESCAPES[c]);
+}
+
+const HEX_COLOR_RE = /^#?([0-9a-fA-F]{6})$/;
+
+/**
+ * Validate a color before it goes into a style attribute. Returns the bare
+ * six-digit hex, or the fallback when the value is not one. Colors land in
+ * CSS, where escaping alone is not enough, so they are validated instead.
+ */
+function safeHex(value, fallback = null) {
+  const m = HEX_COLOR_RE.exec(String(value ?? ""));
+  return m ? m[1] : fallback;
+}
+
 /* ────────────────────── version sync ────────────────────── */
 
 const RESOURCE_URL = (() => {
@@ -99,11 +125,12 @@ function faceplateForeground(hex) {
 
 /** Build the chassis inline-style vars for a faceplate color (empty when none). */
 function faceplateChassisStyle(hex, prefix = "--c4-btn") {
-  if (!hex) return "";
-  const fg = faceplateForeground(hex);
-  const bc = faceplateButtonColor(hex);
+  const safe = safeHex(hex);
+  if (!safe) return "";
+  const fg = faceplateForeground(safe);
+  const bc = faceplateButtonColor(safe);
   return [
-    `background:#${hex}`,
+    `background:#${safe}`,
     `${prefix}-bg:#${bc}`,
     `${prefix}-border:${fg.border}`,
     `${prefix}-text:${fg.text}`,
@@ -142,8 +169,8 @@ function actionChipsHtml(action, hass) {
   const svcIcon = DOMAIN_ICONS[domain] || "mdi:cog";
   const serviceChip = `
     <span class="action-chip service-chip">
-      <ha-icon icon="${svcIcon}"></ha-icon>
-      ${domainLabel} '${svcLabel}'
+      <ha-icon icon="${esc(svcIcon)}"></ha-icon>
+      ${esc(domainLabel)} '${esc(svcLabel)}'
     </span>`;
 
   const entityId = (action.target || {}).entity_id || "";
@@ -156,8 +183,8 @@ function actionChipsHtml(action, hass) {
     const entityIcon = stateObj?.attributes?.icon || DOMAIN_ICONS[entityId.split(".")[0]] || "mdi:eye";
     entityChip = `
       <span class="action-chip entity-chip">
-        <ha-icon icon="${entityIcon}"></ha-icon>
-        ${entityName}
+        <ha-icon icon="${esc(entityIcon)}"></ha-icon>
+        ${esc(entityName)}
       </span>`;
   }
   return serviceChip + entityChip;
@@ -714,8 +741,9 @@ const EDITOR_STYLES = `
 /* ────────────────────── helpers ────────────────────── */
 
 function hexToInputColor(hex) {
-  if (!hex || hex === "000000") return "#000000";
-  return "#" + hex.replace("#", "").padStart(6, "0");
+  const h = String(hex ?? "").replace("#", "");
+  if (!/^[0-9a-fA-F]{1,6}$/.test(h)) return "#000000";
+  return "#" + h.padStart(6, "0");
 }
 
 function inputColorToHex(val) {
@@ -1082,7 +1110,7 @@ class Control4Card extends HTMLElement {
         ` : `
           <div class="card-header">
             ${hasLoad ? `<ha-icon class="entity-icon" icon="${hasDimmer ? "mdi:lightbulb" : "mdi:toggle-switch"}" style="${iconStyle}"></ha-icon>` : ""}
-            <div class="name">${dev.friendly_name}</div>
+            <div class="name">${esc(dev.friendly_name)}</div>
           </div>
 
           <div class="chassis" style="${faceplateChassisStyle(dev.config?.faceplate_color || this._config.faceplate_color)}">
@@ -1092,12 +1120,12 @@ class Control4Card extends HTMLElement {
               const sizeMultiplier = totalSlots < 6 ? Math.floor(6 / totalSlots) : 1;
               return layout.map((btn) => {
                 const cfg = btn.slots[0];
-                const color = ledColor(cfg, devState);
+                const color = safeHex(ledColor(cfg, devState), DEFAULT_COLORS.off);
                 const visualSize = btn.size * sizeMultiplier;
                 return `
-                  <div class="chassis-btn size-${visualSize}" data-slot="${btn.startSlot}">
+                  <div class="chassis-btn size-${esc(visualSize)}" data-slot="${esc(btn.startSlot)}">
                     <div class="btn-inner">
-                      <span class="btn-label">${cfg.name || `Button ${btn.startSlot}`}</span>
+                      <span class="btn-label">${esc(cfg.name || `Button ${btn.startSlot}`)}</span>
                       <div class="led" style="background:#${color}; ${ledRingStyle(color)}; ${color === "000000" ? "visibility:hidden" : ""}"></div>
                     </div>
                   </div>
@@ -1464,8 +1492,8 @@ class Control4CardEditor extends HTMLElement {
           <select id="entity-select">
             <option value="">-- Select --</option>
             ${entities.map((e) => `
-              <option value="${e.entity_id}" ${this._config.entity === e.entity_id ? "selected" : ""}>
-                ${e.display_name}
+              <option value="${esc(e.entity_id)}" ${this._config.entity === e.entity_id ? "selected" : ""}>
+                ${esc(e.display_name)}
               </option>
             `).join("")}
           </select>
@@ -1533,11 +1561,11 @@ class Control4CardEditor extends HTMLElement {
                 // color is black so the editor matches the dashboard
                 // (which suppresses black LEDs to represent the
                 // physically-off state).
-                const color = ledColor(cfg, dev?.state);
+                const color = safeHex(ledColor(cfg, dev?.state), DEFAULT_COLORS.off);
                 const hidden = color === "000000" ? "visibility:hidden" : "";
                 return `
-                  <div class="chassis-slot size-${btn.size} ${isSelected ? "selected" : ""}" data-slot="${btn.startSlot}">
-                    <span class="slot-label">${cfg.name || `Button ${btn.startSlot}`}</span>
+                  <div class="chassis-slot size-${esc(btn.size)} ${isSelected ? "selected" : ""}" data-slot="${esc(btn.startSlot)}">
+                    <span class="slot-label">${esc(cfg.name || `Button ${btn.startSlot}`)}</span>
                     <div class="led-dot" style="background:#${color}; ${ledRingStyle(color)}; ${hidden}"></div>
                   </div>
                 `;
@@ -1554,7 +1582,7 @@ class Control4CardEditor extends HTMLElement {
           </div>
 
           <!-- Save / Reset -->
-          ${this._saveError ? `<div class="save-error">${this._saveError}</div>` : ""}
+          ${this._saveError ? `<div class="save-error">${esc(this._saveError)}</div>` : ""}
           <div class="save-bar">
             <button class="btn-reset" id="reset-btn" ${!this._dirty ? "disabled" : ""}>Reset</button>
             <button class="btn-save" id="save-btn" ${!this._dirty || this._saving ? "disabled" : ""}>
@@ -1595,7 +1623,7 @@ class Control4CardEditor extends HTMLElement {
         ` : ""}
         <div class="config-row">
           <label>Name</label>
-          <input type="text" id="slot-name" value="${slot.name || ""}" placeholder="Button ${slot.slot_id}">
+          <input type="text" id="slot-name" value="${esc(slot.name || "")}" placeholder="Button ${esc(slot.slot_id)}">
         </div>
 
         ${showLoadOptions ? `
@@ -1957,7 +1985,10 @@ class Control4DimmerGrid extends HTMLElement {
   _render() {
     if (!this.shadowRoot) return;
 
-    const maxCols = this._config.columns || 4;
+    // columns lands inside a <style> block, so it is validated as a
+    // positive integer rather than escaped.
+    const cols = parseInt(this._config.columns, 10);
+    const maxCols = Number.isInteger(cols) && cols > 0 ? cols : 4;
     const grid = this.shadowRoot.getElementById("grid");
     if (grid && grid.childElementCount === this._cards.size) return;
 
@@ -1980,7 +2011,7 @@ class Control4DimmerGrid extends HTMLElement {
         }
       </style>
       <ha-card>
-        ${title ? `<div class="grid-title">${title}</div>` : ""}
+        ${title ? `<div class="grid-title">${esc(title)}</div>` : ""}
         <div class="grid-container" id="grid"></div>
       </ha-card>
     `;
@@ -2099,11 +2130,11 @@ class Control4DimmerGridEditor extends HTMLElement {
 
       <div class="config-row">
         <label>Title</label>
-        <input type="text" id="grid-title" value="${this._config.title || ""}" placeholder="Control4 Dimmers">
+        <input type="text" id="grid-title" value="${esc(this._config.title || "")}" placeholder="Control4 Dimmers">
       </div>
       <div class="config-row">
         <label>Columns</label>
-        <input type="number" id="grid-columns" value="${this._config.columns || 4}" min="1" max="6" style="width:60px;flex:none">
+        <input type="number" id="grid-columns" value="${esc(this._config.columns || 4)}" min="1" max="6" style="width:60px;flex:none">
       </div>
 
       ${entities.length === 0 ? `
@@ -2111,12 +2142,12 @@ class Control4DimmerGridEditor extends HTMLElement {
       ` : `
         <div class="tabs" id="tabs">
           ${entities.map((e, i) => `
-            <button class="tab ${i === this._selectedTab ? "active" : ""}" data-idx="${i}" title="${e.name}">
+            <button class="tab ${i === this._selectedTab ? "active" : ""}" data-idx="${i}" title="${esc(e.name)}">
               ${i + 1}
             </button>
           `).join("")}
         </div>
-        <div class="device-name">${selected?.name || ""}</div>
+        <div class="device-name">${esc(selected?.name || "")}</div>
         <div class="sub-editor-container" id="sub-editor"></div>
       `}
     `;
