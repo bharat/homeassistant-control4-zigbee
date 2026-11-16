@@ -219,3 +219,68 @@ async def test_service_stays_open_to_non_admin(
         blocking=True,
         context=Context(user_id=hass_read_only_user.id),
     )
+
+
+# ── websocket slot color validation ──────────────────────────────────
+
+
+@pytest.mark.parametrize(
+    "color", ["ff0000 05 000000", "ff0000\nc4.dmx.led 00 05 000000", "c4.", "ff00"]
+)
+async def test_ws_device_config_rejects_non_hex_slot_colors(
+    hass: HomeAssistant,
+    hass_ws_client,
+    manager: MagicMock,
+    color: str,
+) -> None:
+    """Slot colors from the card must be six-digit hex before they reach c4_cmd."""
+    await _register_websocket_handlers(hass)
+    client = await hass_ws_client(hass)
+    for field in ("led_on_color", "led_off_color"):
+        await client.send_json(
+            {
+                "id": 1 if field == "led_on_color" else 2,
+                "type": f"{DOMAIN}/device_config",
+                "ieee_address": IEEE,
+                "slots": [{"slot_id": 1, field: color}],
+            }
+        )
+        resp = await client.receive_json()
+        assert resp["success"] is False
+        assert resp["error"]["code"] == "invalid_format"
+    manager.async_configure_device.assert_not_called()
+
+
+async def test_ws_device_config_normalizes_slot_colors(
+    hass: HomeAssistant,
+    hass_ws_client,
+    manager: MagicMock,
+) -> None:
+    await _register_websocket_handlers(hass)
+    client = await hass_ws_client(hass)
+    await client.send_json(
+        {
+            "id": 1,
+            "type": f"{DOMAIN}/device_config",
+            "ieee_address": IEEE,
+            "slots": [
+                {
+                    "slot_id": 1,
+                    "name": "One",
+                    "led_on_color": "#FF0000",
+                    "led_off_color": "0000FF",
+                }
+            ],
+        }
+    )
+    resp = await client.receive_json()
+    assert resp["success"] is True
+    slots = manager.async_configure_device.await_args.kwargs["slots"]
+    assert slots == [
+        {
+            "slot_id": 1,
+            "name": "One",
+            "led_on_color": "ff0000",
+            "led_off_color": "0000ff",
+        }
+    ]
