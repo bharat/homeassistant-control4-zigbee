@@ -406,6 +406,13 @@ class TestOrphanedSlotEntities:
         for state in states:
             ieee = state.ieee_address
             manager._devices[ieee] = state
+            if state.device_type:
+                # A saved config is what confirms a type for removal.
+                store._devices[ieee] = DeviceConfig(
+                    ieee_address=ieee,
+                    friendly_name=state.friendly_name,
+                    device_type=state.device_type,
+                )
             for slot in (1, 2, 3, 4, 5, 6, "paddle_up", "paddle_down"):
                 ent_reg.async_get_or_create(
                     "event", DOMAIN, self._uid(ieee, slot), config_entry=entry
@@ -418,6 +425,13 @@ class TestOrphanedSlotEntities:
         added: list = []
         await event_async_setup_entry(hass, entry, added.extend)
         return manager, entry, ent_reg, added
+
+    @staticmethod
+    def _retype(manager: Control4Manager, state: DeviceState, new_type: str) -> None:
+        """Change a device's type the way a saved detection would."""
+        state.device_type = new_type
+        manager.store._devices[state.ieee_address].device_type = new_type
+        manager.notify_listeners()
 
     def _event_uids(self, ent_reg: er.EntityRegistry, ieee: str) -> set[str]:
         prefix = f"{ieee}_event_"
@@ -451,8 +465,7 @@ class TestOrphanedSlotEntities:
         assert len(added) == 8 + 6
 
         # Reclassified as a plain dimmer: only slots 2 and 5 remain.
-        state.device_type = "dimmer"
-        manager.notify_listeners()
+        self._retype(manager, state, "dimmer")
         assert self._event_uids(ent_reg, IEEE_DIMMER) == {
             self._uid(IEEE_DIMMER, s) for s in (2, 5, "paddle_up", "paddle_down")
         }
@@ -478,13 +491,11 @@ class TestOrphanedSlotEntities:
             device_type="keypaddim",
         )
         manager, _entry, ent_reg, added = await self._setup(hass, state)
-        state.device_type = "dimmer"
-        manager.notify_listeners()
+        self._retype(manager, state, "dimmer")
         assert self._uid(IEEE_DIMMER, 1) not in self._event_uids(ent_reg, IEEE_DIMMER)
         before = len(added)
 
-        state.device_type = "keypaddim"
-        manager.notify_listeners()
+        self._retype(manager, state, "keypaddim")
         new_uids = {e.unique_id for e in added[before:]}
         assert new_uids == {self._uid(IEEE_DIMMER, s) for s in (1, 3, 4, 6)}
 
@@ -499,8 +510,7 @@ class TestOrphanedSlotEntities:
             device_type="keypaddim",
         )
         manager, _entry, ent_reg, _added = await self._setup(hass, state)
-        state.device_type = "switch"
-        manager.notify_listeners()
+        self._retype(manager, state, "switch")
         assert self._event_uids(ent_reg, IEEE_DIMMER) == {
             self._uid(IEEE_DIMMER, s) for s in (2, 6, "paddle_up", "paddle_down")
         }
@@ -526,6 +536,21 @@ class TestOrphanedSlotEntities:
         assert self._event_uids(ent_reg, IEEE_DIMMER) == {
             self._uid(IEEE_DIMMER, s) for s in (1, 2, 3, 4, 5, 6)
         }
+
+    async def test_live_type_alone_never_removes_entities(
+        self, hass: HomeAssistant
+    ) -> None:
+        """A c4_device_type from MQTT, with nothing stored, removes nothing."""
+        state = DeviceState(
+            ieee_address=IEEE_DIMMER,
+            friendly_name="Kitchen",
+            model_id="C4-KD120",
+            device_type=None,
+        )
+        manager, _entry, ent_reg, _added = await self._setup(hass, state)
+        state.update_from_mqtt({"c4_device_type": "dimmer"})
+        manager.notify_listeners()
+        assert len(self._event_uids(ent_reg, IEEE_DIMMER)) == 8
 
     async def test_undetected_device_keeps_restored_entities(
         self, hass: HomeAssistant

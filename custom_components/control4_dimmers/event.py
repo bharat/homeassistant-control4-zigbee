@@ -99,8 +99,13 @@ async def async_setup_entry(
             # type left behind so they do not linger as restored entities
             # with nothing behind them (issue #247). Runs the first time a
             # device's type is known, which also clears leftovers from a
-            # previous run.
-            if wanted_by_device.get(ieee) != wanted:
+            # previous run. Only a type that does not rest on a live MQTT
+            # report alone (stored, user-set, or from the model) may remove
+            # entities; a forged c4_device_type must not delete them.
+            if (
+                wanted_by_device.get(ieee) != wanted
+                and manager.confirmed_type(ieee) == device_type
+            ):
                 wanted_by_device[ieee] = frozenset(wanted)
                 _remove_orphaned_slot_entities(
                     hass, entry.entry_id, ieee, wanted, known

@@ -118,6 +118,11 @@ async def async_setup_entry(
     async_add_entities([Control4AuditSensor(manager, entry.entry_id)])
 
     def _has_load(ieee: str, state: DeviceState) -> bool:
+        # Only device types that drive a load get load sensors, so a stray
+        # (or forged) c4_load_power on a keypad does not register seven
+        # sensors for good.
+        if not manager.has_load(ieee):
+            return False
         # Readings are only held in memory and can't be polled, so after a reload
         # the registry is what remembers that this device has a load.
         return "c4_load_power" in state.raw or bool(
