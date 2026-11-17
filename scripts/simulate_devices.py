@@ -313,9 +313,13 @@ class C4Simulator:
         self._connected_once = False
         self.device_states: dict[str, dict] = {}
         self._device_map: dict[str, dict] = {}
+        # Zigbee2MQTT accepts set commands addressed by IEEE as well as by
+        # friendly name; the integration publishes to the IEEE form.
+        self._name_by_ieee: dict[str, str] = {}
 
         for dev in DEVICES:
             self._device_map[dev["friendly_name"]] = dev
+            self._name_by_ieee[dev["ieee_address"]] = dev["friendly_name"]
             if fresh:
                 self.device_states[dev["friendly_name"]] = build_initial_state(dev)
             else:
@@ -347,6 +351,7 @@ class C4Simulator:
         if not topic.endswith("/set"):
             return
         device_name = topic[len(self.topic) + 1 : -4]
+        device_name = self._name_by_ieee.get(device_name, device_name)
         state = self.device_states.get(device_name)
         if state is None:
             return

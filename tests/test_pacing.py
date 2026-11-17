@@ -46,9 +46,9 @@ class _PublishRecorder:
         await asyncio.sleep(self.hold)
         self.active -= 1
 
-    def starts_for(self, name: str) -> list[float]:
-        """Start timestamps for publishes to the device with this name."""
-        needle = f"/{name}/set"
+    def starts_for(self, ieee: str) -> list[float]:
+        """Start timestamps for publishes to the device with this IEEE."""
+        needle = f"/{ieee}/set"
         return [t for topic, _payload, t in self.calls if topic.endswith(needle)]
 
 
@@ -147,7 +147,7 @@ class TestSameDevicePacing:
         # Serialized: publishes to the same device never overlap.
         assert rec.max_active == 1
         # Paced: consecutive sends to the device are >= MIN_SEND_INTERVAL apart.
-        starts = rec.starts_for("Theater")
+        starts = rec.starts_for(IEEE_A)
         assert len(starts) > 1
         gaps = [b - a for a, b in pairwise(starts)]
         tolerance = MIN_SEND_INTERVAL * 0.9
@@ -167,7 +167,7 @@ class TestSameDevicePacing:
                 await mgr.async_send_mqtt(
                     IEEE_A, {"c4_cmd": f"c4.dmx.led 0{i} 05 ffffff"}
                 )
-        starts = rec.starts_for("Theater")
+        starts = rec.starts_for(IEEE_A)
         gaps = [b - a for a, b in pairwise(starts)]
         assert all(g >= MIN_SEND_INTERVAL * 0.9 for g in gaps), gaps
 
@@ -323,6 +323,67 @@ class TestFifoOrdering:
 
         colors = [payload["c4_cmd"].split()[-1] for _topic, payload, _t in rec.calls]
         assert colors == [f"{i:06d}" for i in range(6)]
+
+
+class TestIeeeAddressing:
+    """Commands are published to the IEEE topic, never the friendly name."""
+
+    @pytest.mark.asyncio
+    async def test_publishes_to_ieee_topic(self, mock_hass: MagicMock) -> None:
+        mgr, _ = _manager_with_device(mock_hass, ieee=IEEE_A, friendly_name="Theater")
+        rec = _PublishRecorder(hold=0)
+        with patch(
+            "custom_components.control4_dimmers.manager.mqtt.async_publish",
+            new=rec.publish,
+        ):
+            await mgr.async_send_mqtt(IEEE_A, {"state": "ON"})
+        assert [topic for topic, _payload, _t in rec.calls] == [
+            f"zigbee2mqtt/{IEEE_A}/set"
+        ]
+
+    @pytest.mark.asyncio
+    async def test_swapped_friendly_names_do_not_redirect(
+        self, mock_hass: MagicMock
+    ) -> None:
+        """A device list that swaps two names cannot move a command."""
+        mgr, _ = _manager_with_device(mock_hass, ieee=IEEE_A, friendly_name="DeviceA")
+        mgr._devices[IEEE_B] = DeviceState(
+            ieee_address=IEEE_B, friendly_name="DeviceB", device_type="keypad"
+        )
+        mgr._devices[IEEE_A].friendly_name = "DeviceB"
+        mgr._devices[IEEE_B].friendly_name = "DeviceA"
+        rec = _PublishRecorder(hold=0)
+        with patch(
+            "custom_components.control4_dimmers.manager.mqtt.async_publish",
+            new=rec.publish,
+        ):
+            await mgr.async_send_mqtt(IEEE_A, {"state": "OFF"})
+        assert [topic for topic, _payload, _t in rec.calls] == [
+            f"zigbee2mqtt/{IEEE_A}/set"
+        ]
+
+    @pytest.mark.asyncio
+    async def test_press_button_load_fallback_uses_ieee_topic(
+        self, mock_hass: MagicMock
+    ) -> None:
+        """The press_button load fallback publishes to the IEEE topic too."""
+        config = _keypad_config(IEEE_A)
+        config.slots[0].behavior = "toggle_load"
+        mgr, _ = _manager_with_device(
+            mock_hass, ieee=IEEE_A, friendly_name="Theater", config=config
+        )
+        rec = _PublishRecorder(hold=0)
+        with (
+            patch.object(mgr, "_find_light_entity", return_value=None),
+            patch(
+                "custom_components.control4_dimmers.manager.mqtt.async_publish",
+                new=rec.publish,
+            ),
+        ):
+            await mgr.press_button(IEEE_A, 1)
+        assert [(topic, payload) for topic, payload, _t in rec.calls] == [
+            (f"zigbee2mqtt/{IEEE_A}/set", {"state": "TOGGLE"})
+        ]
 
 
 # ── (f) Pruning per-device pacing state on removal ───────────────────

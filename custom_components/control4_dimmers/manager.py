@@ -1928,7 +1928,8 @@ class Control4Manager:
                 # button never went through HA, so no light entity got
                 # auto-discovered with a matching name. Fake a press by
                 # publishing the on/off command straight to the
-                # device's Z2M topic; Z2M sends the standard Zigbee
+                # device's Z2M set topic (addressed by IEEE); Z2M
+                # sends the standard Zigbee
                 # on/off cluster command and the keypad firmware
                 # toggles the local load just as it would for a
                 # physical button press.
@@ -2352,12 +2353,18 @@ class Control4Manager:
         button_N_* state writes that describe them in the order they were
         issued. Sends to different devices use different locks and may
         overlap. A publish that raises propagates to the caller unchanged.
+
+        The topic addresses the device by IEEE (<base>/<ieee>/set), which
+        Zigbee2MQTT accepts alongside the friendly name. Friendly names
+        come from the device list on the broker, so a forged list that
+        swaps two names would otherwise redirect commands to the wrong
+        device. The IEEE is the key this integration tracks the device by.
         """
         state = self._devices.get(ieee_address)
         if state is None:
             msg = f"Unknown or undiscovered Control4 device: {ieee_address!r}"
             raise HomeAssistantError(msg)
-        topic = f"{self.mqtt_topic}/{state.friendly_name}/set"
+        topic = f"{self.mqtt_topic}/{ieee_address}/set"
         async with self._device_lock(self._send_locks, ieee_address):
             wait = self._next_send_at.get(ieee_address, 0.0) - time.monotonic()
             if wait > 0:
