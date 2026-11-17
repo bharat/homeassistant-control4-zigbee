@@ -448,6 +448,60 @@ The integration reads each device's dimming table once and Zigbee2MQTT keeps the
   [zigbee2mqtt-control4#3](https://github.com/bharat/zigbee2mqtt-control4/issues/3)
   for the full investigation.
 
+## Security
+
+### Securing your MQTT broker
+
+Zigbee2MQTT and this integration talk to each other only through your MQTT
+broker, and they trust what they read there. Anyone who can publish to the
+broker can send Zigbee2MQTT commands to your devices and can forge button
+presses, which run whatever actions you bound to those buttons. Treat
+publish access to `zigbee2mqtt/#` like access to the switches themselves.
+
+Give every client its own username and password, turn off anonymous
+access, and let only the Zigbee2MQTT user and the Home Assistant user
+publish under `zigbee2mqtt/#`. With Mosquitto, that looks like this:
+
+```
+# mosquitto.conf
+allow_anonymous false
+password_file /mosquitto/config/passwords
+acl_file /mosquitto/config/acl
+```
+
+```
+# /mosquitto/config/acl
+user zigbee2mqtt
+topic readwrite zigbee2mqtt/#
+topic readwrite homeassistant/#
+
+user homeassistant
+topic readwrite zigbee2mqtt/#
+topic readwrite homeassistant/#
+
+# Any other client that needs to watch device state gets read-only access.
+user dashboard
+topic read zigbee2mqtt/#
+```
+
+Use your own usernames, and change `zigbee2mqtt` if you set a different
+base topic. The `homeassistant/#` lines cover MQTT discovery. Once an ACL
+file is in place, a user with no entry in it has no access at all.
+
+The integration also limits what a forged message can do:
+
+- Retained button presses are ignored, so a press left on the broker does
+  not fire again when Home Assistant restarts or reconnects.
+- Button actions run with the caller's permissions. An action started
+  through the `control4_dimmers.press_button` service can only do what the
+  user who called it is allowed to do.
+- Commands are sent to each device by its Zigbee address (IEEE), not its
+  name, so a forged device list that swaps two names does not send
+  commands to the wrong device.
+
+These limits reduce the damage; they do not replace broker access
+control.
+
 ## Services
 
 The integration exposes the following service actions you can call
