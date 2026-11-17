@@ -8,7 +8,7 @@
   ],
   "labels": ["dependencies"],
   "minimumReleaseAge": "14 days",
-  "enabledManagers": ["pip_requirements", "github-actions", "devcontainer"],
+  "enabledManagers": ["pip_requirements", "github-actions", "devcontainer", "pre-commit"],
   "packageRules": [
     {
       "matchManagers": ["pip_requirements"],
