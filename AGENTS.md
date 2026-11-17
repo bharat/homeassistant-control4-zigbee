@@ -113,7 +113,11 @@ This integration and the Zigbee-side definition are separate codebases coupled o
 
 Tags use **CalVer**: `v<YYYY>.<M>.<DD>` (e.g. `v2026.5.13`). Release titles use `Control4 Zigbee v<YYYY>.<M>.<DD>`. Matches the fleet-wide HA-integration convention (triad-ams set the canonical shape).
 
-The release workflow (`.github/workflows/release.yml`) auto-creates the GitHub release on `v*` tag push and attaches `control4_dimmers.zip`: the integration folder with the tag's version written into `manifest.json`. `hacs.json` sets `zip_release`, so HACS installs that zip and Home Assistant shows the real version. Keep `manifest.json` at `"0.0.0"` in source. To attach the zip to an existing release (without touching its notes), run the workflow by hand with that tag.
+The release workflow (`.github/workflows/release.yml`) runs on `v*` tag push and attaches `control4_dimmers.zip` (the integration folder with the tag's version written into `manifest.json`) plus `control4_dimmers.zip.sha256`. `hacs.json` sets `zip_release`, so HACS installs that zip and Home Assistant shows the real version. Keep `manifest.json` at `"0.0.0"` in source.
+
+It has two jobs. `build` (read-only token) checks out `refs/tags/<tag>` without persisted credentials, fails unless the checkout is the tagged commit and that commit is already on `main`, refuses symlinks in the integration folder, builds and checksums the zip, and records a build provenance attestation (verify a download with `gh attestation verify control4_dimmers.zip --repo bharat/homeassistant-control4-zigbee`). `publish` (the only job with `contents: write`) downloads that artifact, checks the checksum, and uses the `gh` CLI to create the release as a draft with generated notes (or reuse one you already created with your own notes), upload both files, and publish it.
+
+**Releases are immutable.** Assets are never replaced (there is no `--clobber` and no manual re-run path), so a rerun against a finished release fails. A bad release is fixed by tagging a new version, not by editing the old one. Tag only commits that are on `main`.
 
 Build the GitHub release body in three parts:
 
