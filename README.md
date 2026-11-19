@@ -106,22 +106,22 @@ The C4-DIM1-Z (community report): on/off and brightness work, and paddle presses
 
 #### Lux
 
-The current Lux line ([spec guide](https://cdn.prod.website-files.com/629926620ba03720384bebb3/682e3e6a69d43b24d7c77270_Control4%20Lux%20Spec%20Guide.pdf)) is listed as Zigbee 3.0 rather than the Zigbee Pro of the models above. Whether it uses the same Control4 text protocol is unknown, so it may need separate work. Each Lux model covers 120-240V on its own, so there are no separate voltage variants (and no 277V versions). The fan controller (C4-L-4SF120) is 120V only.
+The current Lux line ([spec guide](https://cdn.prod.website-files.com/629926620ba03720384bebb3/682e3e6a69d43b24d7c77270_Control4%20Lux%20Spec%20Guide.pdf)) is listed as Zigbee 3.0 rather than the Zigbee Pro of the models above. Whether it uses the same Control4 text protocol is unknown, so it may need separate work. Each Lux model covers 120-240V on its own, so there are no separate voltage variants (and no 277V versions). For the fan controller (C4-L-4SF120), the spec guide says 120V but its own spec sheet says 120-240V. The Motion Dimmer and No Neutral Dimmer Switch have no spec sheet yet.
 
 <details><summary>Show table</summary>
 
 | Model | Status | Type | Zigbee role |
 | ------- | ------- | ------ | -------- |
-| C4-L-KC | **Unknown** | Lux Configurable Keypad | Router (expected) |
-| C4-L-KDS | **Unknown** | Lux Keypad Dimmer Switch | Router (expected) |
-| C4-L-CDSW | **Unknown** | Lux Dual Dimmer Switch Keypad | Router (expected) |
-| C4-L-UDIM | **Unknown** | Lux Universal Dimmer | Router (expected) |
+| [C4-L-KC](https://help.snapone.com/lux-qs/Content/156_24_LuxLighting_SpecSheet_C4-L-KC.pdf) | **Unknown** | Lux Configurable Keypad | Router (expected) |
+| [C4-L-KDS](https://help.snapone.com/lux-qs/Content/156_24_LuxLighting_SpecSheet_C4-L-KDS.pdf) | **Unknown** | Lux Keypad Dimmer Switch | Unknown (works without a neutral) |
+| [C4-L-CDSW](https://help.snapone.com/lux-qs/Content/156_24_LuxLighting_SpecSheet_C4-L-CDSW.pdf) | **Unknown** | Lux Dual Dimmer Switch Keypad | Router (expected) |
+| [C4-L-UDIM](https://help.snapone.com/lux-qs/Content/156_24_LuxLighting_SpecSheet_C4-L-UDIM.pdf) | **Unknown** | Lux Universal Dimmer | Router (expected) |
 | C4-L-MDIM | **Unknown** | Lux Motion Dimmer | Router (expected) |
-| C4-L-TV | **Unknown** | Lux 0-10V Dimmer | Router (expected) |
-| C4-L-NNDSW | **Unknown** | Lux No Neutral Dimmer Switch | Router (expected) |
-| C4-L-SW | **Unknown** | Lux Switch | Router (expected) |
-| C4-L-FSW | **Unknown** | Lux Fireplace Switch | Router (expected) |
-| C4-L-4SF120 | **Unknown** | Lux Variable Speed Controller (fan) | Router (expected) |
+| [C4-L-TV](https://help.snapone.com/lux-qs/Content/156_24_LuxLighting_SpecSheet_C4-L-TV.pdf) | **Unknown** | Lux 0-10V Dimmer | Router (expected) |
+| C4-L-NNDSW | **Unknown** | Lux No Neutral Dimmer Switch | Unknown (no neutral) |
+| [C4-L-SW](https://help.snapone.com/lux-qs/Content/156_24_LuxLighting_SpecSheet_C4-L-SW.pdf) | **Unknown** | Lux Switch | Router (expected) |
+| [C4-L-FSW](https://help.snapone.com/lux-qs/Content/156_24_LuxLighting_SpecSheet_C4-L-FSW.pdf) | **Unknown** | Lux Fireplace Switch | Router (expected) |
+| [C4-L-4SF120](https://help.snapone.com/lux-qs/Content/156_24_LuxLighting_SpecSheet_C4-L-4SF120.pdf) | **Unknown** | Lux Variable Speed Controller (fan) | Router (expected) |
 
 </details>
 
@@ -200,7 +200,7 @@ These are often mistaken for Control4 Zigbee devices, but have nothing for this 
 | [C4-HALO-BL](https://docs.control4.com/docs/product/halo-remote/data-sheet/english/latest), [C4-HALO-TS-*](https://docs.control4.com/docs/product/halo-remote-touch/data-sheet/english/latest) | **Not supported** | Halo and Halo Touch remotes | Wi-Fi, no Zigbee radio |
 | [Neeo](https://docs.control4.com/docs/product/neeo-remote/data-sheet/english/latest) | **Not supported** | Neeo Remote | Wi-Fi, no Zigbee radio |
 | [C4-KA, C4-L-KA](https://docs.control4.com/docs/product/auxiliary-keypad/data-sheet/english/latest) | **Not supported** | Auxiliary Keypad | No radio. It connects to a dimmer, switch or fan controller over the 3-way wiring, and that device reports its presses (see [Paddle events and 3-way auxiliary switches](#paddle-events-and-3-way-auxiliary-switches)) |
-| C4-L-KCB | **Not supported** | Lux Wired Keypad | Wired (RS-485), no Zigbee radio |
+| [C4-L-KCB](https://help.snapone.com/lux-qs/Content/156_24_LuxLighting_SpecSheet_C4-L-KCB.pdf) | **Not supported** | Lux Wired Keypad | Wired (RS-485), no Zigbee radio |
 | Somfy, QMotion, Yale, Kwikset and other "works with Control4" devices | **Not supported** | Third-party shades and locks | Standard Zigbee 3.0 or Zigbee Home Automation, not the Control4 protocol. Pair them with Zigbee2MQTT directly |
 
 </details>
