@@ -46,10 +46,10 @@ To move a device to a new Zigbee mesh, use the **13-4-13** factory reset sequenc
 
 | Model | Status | Type | Dimming | LED Control | Buttons | Zigbee role |
 |-------|--------|------|:---:|:---:|:---:|------|
-| C4-APD120, C4-APD240, C4-APD277 | **Confirmed** | [Adaptive Phase Dimmer](https://docs.control4.com/docs/product/wireless-adaptive-phase-dimmer/data-sheet/english/latest) | Yes | Yes | 2 (rocker) | Router |
-| C4-KD120, C4-KD240, C4-KD277 | **Confirmed** | [Keypad Dimmer](https://docs.control4.com/docs/product/wireless-keypad-dimmer/data-sheet/english/latest) | Yes | Yes | 6 (rocker + keypad) | Router |
-| C4-KC120277, C4-KC240 | **Confirmed** | [Configurable Keypad](https://docs.control4.com/docs/product/wireless-configurable-keypad/data-sheet/english/latest) | N/A | Yes | 6 (configurable slots) | Router (expected) |
-| C4-SW120277, C4-SW240 | **Community confirmed** | [Switch (on/off)](https://docs.control4.com/docs/product/wireless-switch-120v-277v/data-sheet/english/latest) | No | Untested | 2 (rocker) | Router |
+| C4-APD120/240/277 | **Confirmed** | [Adaptive Phase Dimmer](https://docs.control4.com/docs/product/wireless-adaptive-phase-dimmer/data-sheet/english/latest) | Yes | Yes | 2 (rocker) | Router |
+| C4-KD120/240/277 | **Confirmed** | [Keypad Dimmer](https://docs.control4.com/docs/product/wireless-keypad-dimmer/data-sheet/english/latest) | Yes | Yes | 6 (rocker + keypad) | Router |
+| C4-KC120277/240 | **Confirmed** | [Configurable Keypad](https://docs.control4.com/docs/product/wireless-configurable-keypad/data-sheet/english/latest) | N/A | Yes | 6 (configurable slots) | Router (expected) |
+| C4-SW120277/240 | **Community confirmed** | [Switch (on/off)](https://docs.control4.com/docs/product/wireless-switch-120v-277v/data-sheet/english/latest) | No | Untested | 2 (rocker) | Router |
 
 The switch works on/off through a `switch` entity (no brightness slider). Units that answer the dim probe are recognised automatically; the rest need `set_device_type` with `switch` (see Troubleshooting).
 
@@ -57,10 +57,10 @@ All newer Control4 Zigbee devices with manufacturer ID `43981` (`0xABCD`) are ex
 
 | Model | Status | Type | Zigbee role |
 | ------- | ------- | ------ | -------- |
-| C4-APD120-C, C4-APD240-C, C4-APD277-C | **Unknown** | [Adaptive Phase Dimmer, Contemporary](https://docs.control4.com/docs/product/wireless-adaptive-phase-dimmer-contemporary/data-sheet/english/latest) | Router (expected) |
-| C4-KD120-C, C4-KD240-C, C4-KD277-C | **Unknown** | [Keypad Dimmer, Contemporary](https://docs.control4.com/docs/product/wireless-keypad-dimmer-contemporary/data-sheet/english/latest) | Router (expected) |
-| C4-KC120277-C, C4-KC240-C | **Unknown** | [Configurable Keypad, Contemporary](https://docs.control4.com/docs/product/wireless-configurable-keypad-contemporary/data-sheet/english/latest) | Router (expected) |
-| C4-SW120277-C, C4-SW240-C | **Unknown** | [Switch, Contemporary](https://docs.control4.com/docs/product/wireless-switch-contemporary/data-sheet/english/latest) | Router (expected) |
+| C4-APD120/240/277-C | **Unknown** | [Adaptive Phase Dimmer, Contemporary](https://docs.control4.com/docs/product/wireless-adaptive-phase-dimmer-contemporary/data-sheet/english/latest) | Router (expected) |
+| C4-KD120/240/277-C | **Unknown** | [Keypad Dimmer, Contemporary](https://docs.control4.com/docs/product/wireless-keypad-dimmer-contemporary/data-sheet/english/latest) | Router (expected) |
+| C4-KC120277/240-C | **Unknown** | [Configurable Keypad, Contemporary](https://docs.control4.com/docs/product/wireless-configurable-keypad-contemporary/data-sheet/english/latest) | Router (expected) |
+| C4-SW120277/240-C | **Unknown** | [Switch, Contemporary](https://docs.control4.com/docs/product/wireless-switch-contemporary/data-sheet/english/latest) | Router (expected) |
 
 #### Other dimmers and fan controllers
 
@@ -68,8 +68,8 @@ All newer Control4 Zigbee devices with manufacturer ID `43981` (`0xABCD`) are ex
 | ------- | ------- | ------ | -------- |
 | C4-FPD120 | **Unknown** | [Forward Phase Dimmer](https://docs.control4.com/docs/product/wireless-forward-phase-dimmer/data-sheet/english/latest) | Router (expected) |
 | C4-V-FPD120 | **Unknown** | [Essential Forward Phase Dimmer](https://docs.control4.com/docs/product/essential-forward-phase-dimmer-120v-white/data-sheet/english/latest) | Router (expected) |
-| C4-TV120277, C4-TV240 | **Unknown** | [0-10V Dimmer](https://docs.control4.com/docs/product/wireless-0-10v-dimmer/data-sheet/english/latest) | Router (expected) |
-| C4-TV120277-C, C4-TV240-C | **Unknown** | [0-10V Dimmer, Contemporary](https://docs.control4.com/docs/product/wireless-0-10v-dimmer-contemporary/data-sheet/english/latest) | Router (expected) |
+| C4-TV120277/240 | **Unknown** | [0-10V Dimmer](https://docs.control4.com/docs/product/wireless-0-10v-dimmer/data-sheet/english/latest) | Router (expected) |
+| C4-TV120277/240-C | **Unknown** | [0-10V Dimmer, Contemporary](https://docs.control4.com/docs/product/wireless-0-10v-dimmer-contemporary/data-sheet/english/latest) | Router (expected) |
 | C4-4SF120 | **Unknown** | [Fan Speed Controller](https://docs.control4.com/docs/product/wireless-fan-speed-controller/data-sheet/english/latest) | Router (expected) |
 | C4-DM201-Z, C4-DM201-LW-Z, C4-SM201-Z | **Unknown** | [Puck Dimmer and Switch](https://docs.control4.com/docs/product/puck-dimmer/data-sheet/english/latest) (in-box module, 240V) | Router (expected) |
 
