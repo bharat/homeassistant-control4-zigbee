@@ -85,7 +85,7 @@ Control4 replaced these with the models above in 2013 ([migration sheet](https:/
 
 #### Lux
 
-The current Lux line ([spec guide](https://cdn.prod.website-files.com/629926620ba03720384bebb3/682e3e6a69d43b24d7c77270_Control4%20Lux%20Spec%20Guide.pdf)) is listed as Zigbee 3.0 rather than the Zigbee Pro of the models above. Whether it uses the same Control4 text protocol is unknown, so it may need separate work.
+The current Lux line ([spec guide](https://cdn.prod.website-files.com/629926620ba03720384bebb3/682e3e6a69d43b24d7c77270_Control4%20Lux%20Spec%20Guide.pdf)) is listed as Zigbee 3.0 rather than the Zigbee Pro of the models above. Whether it uses the same Control4 text protocol is unknown, so it may need separate work. Each Lux model covers 120-240V on its own, so there are no separate voltage variants (and no 277V versions). The fan controller (C4-L-4SF120) is 120V only.
 
 | Model | Status | Type | Zigbee role |
 | ------- | ------- | ------ | -------- |
