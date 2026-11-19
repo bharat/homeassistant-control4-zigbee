@@ -67,18 +67,21 @@ The Contemporary (`-C`) versions of the models above. Their data sheets describe
 | [C4-KD120/240/277-C](https://docs.control4.com/docs/product/wireless-keypad-dimmer-contemporary/data-sheet/english/latest) | **Likely** | Keypad Dimmer, Contemporary | Router (expected) |
 | [C4-KC120277/240-C](https://docs.control4.com/docs/product/wireless-configurable-keypad-contemporary/data-sheet/english/latest) | **Likely** | Configurable Keypad, Contemporary | Router (expected) |
 | [C4-SW120277/240-C](https://docs.control4.com/docs/product/wireless-switch-contemporary/data-sheet/english/latest) | **Likely** | Switch, Contemporary | Router (expected) |
+| C4-FPD120-C | **Likely** | Forward Phase Dimmer, Contemporary (listed as compatible on the [Contemporary auxiliary's data sheet](https://docs.control4.com/docs/product/auxiliary-keypad-contemporary/data-sheet/english/latest); no data sheet of its own found) | Router (expected) |
+| C4-4SF120-C | **Unknown** | Fan Speed Controller, Contemporary (same source; written there as C4-4FS120-C) | Router (expected) |
 
 </details>
 
 #### Auxiliary keypads
 
-Auxiliary keypads have no radio. They wire to a dimmer, switch or fan controller over the existing 3-way wiring and talk to it over those wires, so they work through that device: its paddle events fire when the auxiliary is pressed (see [Paddle events and 3-way auxiliary switches](#paddle-events-and-3-way-auxiliary-switches)). Up to 10 can share one device. The Lux auxiliary also lists the APD, FPD, KD and SW above as compatible.
+Auxiliary keypads have no radio. They wire to a dimmer, switch or fan controller over the existing 3-way wiring and talk to it over those wires, so they work through that device: its paddle events fire when the auxiliary is pressed (see [Paddle events and 3-way auxiliary switches](#paddle-events-and-3-way-auxiliary-switches)). Control4 made one auxiliary per lineup, and each covers every voltage on its own (110-277V for the C4-KA and C4-KA-C, 120-240V for the C4-L-KA). Up to 10 can share one device. The Lux auxiliary also lists the APD, FPD, KD and SW above as compatible.
 
 <details><summary>Show table</summary>
 
 | Model | Status | Type | Zigbee role |
 | ------- | ------- | ------ | -------- |
 | [C4-KA](https://docs.control4.com/docs/product/auxiliary-keypad/data-sheet/english/latest) | **Community confirmed** (through its main device) | Auxiliary Keypad | None (no radio) |
+| [C4-KA-C](https://docs.control4.com/docs/product/auxiliary-keypad-contemporary/data-sheet/english/latest) | **Likely** (through its main device) | Auxiliary Keypad, Contemporary | None (no radio) |
 | [C4-L-KA](https://help.snapone.com/lux-qs/Content/156_24_LuxLighting_SpecSheet_C4-L-KA.pdf) | **Likely** (through its main device) | Lux Auxiliary Keypad | None (no radio) |
 
 </details>
