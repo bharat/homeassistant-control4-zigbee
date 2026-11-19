@@ -36,6 +36,13 @@ from custom_components.control4_dimmers.number import (
 from custom_components.control4_dimmers.number import (
     async_setup_entry as number_async_setup_entry,
 )
+from custom_components.control4_dimmers.sensor import (
+    LOAD_SENSORS,
+    Control4LoadSensor,
+)
+from custom_components.control4_dimmers.sensor import (
+    async_setup_entry as sensor_async_setup_entry,
+)
 from custom_components.control4_dimmers.store import Control4Store
 from custom_components.control4_dimmers.switch import (
     Control4LoadSwitch,
@@ -253,3 +260,32 @@ class TestLoadSwitch:
         state.device_type = "dimmer"
         switch._on_manager_update()
         assert not switch.available
+
+
+class TestLoadSensors:
+    """Power, voltage and the other load readings."""
+
+    async def test_registered_load_sensors_are_recreated_before_the_type(
+        self, hass: HomeAssistant
+    ) -> None:
+        _manager, added = await _setup(
+            hass,
+            sensor_async_setup_entry,
+            _untyped(),
+            [("sensor", f"{IEEE_DIMMER}_c4_load_power")],
+        )
+        load = [e for e in added if isinstance(e, Control4LoadSensor)]
+        assert len(load) == len(LOAD_SENSORS)
+
+    async def test_known_keypad_gets_no_load_sensors_even_if_registered(
+        self, hass: HomeAssistant
+    ) -> None:
+        state = _untyped(IEEE_KEYPAD)
+        state.device_type = "keypad"
+        _manager, added = await _setup(
+            hass,
+            sensor_async_setup_entry,
+            state,
+            [("sensor", f"{IEEE_KEYPAD}_c4_load_power")],
+        )
+        assert not [e for e in added if isinstance(e, Control4LoadSensor)]
