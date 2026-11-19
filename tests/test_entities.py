@@ -254,7 +254,10 @@ class TestEventSetupCreatesPaddles:
     def _stub_entity_registry(self) -> Iterator[None]:
         """Stub the entity registry, which the mock hass does not carry."""
         with (
-            patch("custom_components.control4_dimmers.event.er.async_get"),
+            patch(
+                "custom_components.control4_dimmers.event.er.async_get",
+                return_value=MagicMock(**{"async_get_entity_id.return_value": None}),
+            ),
             patch(
                 "custom_components.control4_dimmers.event."
                 "er.async_entries_for_config_entry",
@@ -555,7 +558,12 @@ class TestOrphanedSlotEntities:
     async def test_undetected_device_keeps_restored_entities(
         self, hass: HomeAssistant
     ) -> None:
-        """Nothing is removed while a device's type is still unknown."""
+        """
+        A device whose type is still unknown gets its registered entities back.
+
+        After a reload the type only returns with the device's next state,
+        so the registry decides what to create, and nothing is removed.
+        """
         state = DeviceState(
             ieee_address=IEEE_DIMMER,
             friendly_name="Kitchen",
@@ -563,7 +571,7 @@ class TestOrphanedSlotEntities:
             device_type=None,
         )
         _manager, _entry, ent_reg, added = await self._setup(hass, state)
-        assert added == []
+        assert {e.unique_id for e in added} == self._event_uids(ent_reg, IEEE_DIMMER)
         assert len(self._event_uids(ent_reg, IEEE_DIMMER)) == 8
 
 

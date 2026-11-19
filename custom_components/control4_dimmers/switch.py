@@ -12,6 +12,8 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 from homeassistant.components.switch import SwitchDeviceClass, SwitchEntity
+from homeassistant.const import STATE_ON
+from homeassistant.helpers.restore_state import RestoreEntity
 
 from .const import DEVICE_TYPE_SWITCH, DOMAIN, LOGGER
 
@@ -52,7 +54,14 @@ async def async_setup_entry(
         for ieee, state in manager.devices.items():
             if ieee in known:
                 continue
-            if _effective_type(manager, ieee) != DEVICE_TYPE_SWITCH:
+            device_type = _effective_type(manager, ieee)
+            # Before the type is known (it arrives in the device's state,
+            # which a reload of this integration doesn't bring back),
+            # recreate the switch the registry remembers.
+            if device_type != DEVICE_TYPE_SWITCH and (
+                device_type is not None
+                or not manager.is_registered("switch", f"{ieee}_switch")
+            ):
                 continue
             known.add(ieee)
             new.append(
@@ -71,7 +80,7 @@ async def async_setup_entry(
     manager.add_listener(_check_new_switches)
 
 
-class Control4LoadSwitch(SwitchEntity):
+class Control4LoadSwitch(SwitchEntity, RestoreEntity):
     """A switch entity representing a relay-only load (no brightness)."""
 
     # Push-based: the manager listener below writes state.
@@ -91,6 +100,7 @@ class Control4LoadSwitch(SwitchEntity):
         self._manager = manager
         self._ieee = ieee_address
         self._unsub_listener: Callable[[], None] | None = None
+        self._restored_on: bool | None = None
         self._attr_unique_id = f"{ieee_address}_switch"
         self._attr_device_info = {
             "identifiers": {(DOMAIN, ieee_address)},
@@ -106,7 +116,11 @@ class Control4LoadSwitch(SwitchEntity):
         return {"ieee_address": self._ieee}
 
     async def async_added_to_hass(self) -> None:
-        """Subscribe to manager updates."""
+        """Restore the last state and subscribe to manager updates."""
+        await super().async_added_to_hass()
+        if (last := await self.async_get_last_state()) is not None:
+            self._restored_on = last.state == STATE_ON
+        self._sync_state()
         self._unsub_listener = self._manager.add_listener(self._on_manager_update)
 
     async def async_will_remove_from_hass(self) -> None:
@@ -128,12 +142,18 @@ class Control4LoadSwitch(SwitchEntity):
             return
         # A device re-typed away from switch (override or re-detection)
         # keeps its entity but goes unavailable rather than lying about a
-        # load it no longer models.
-        self._attr_available = (
-            device.available
-            and _effective_type(self._manager, self._ieee) == DEVICE_TYPE_SWITCH
+        # load it no longer models. A type not known yet (see
+        # async_setup_entry) keeps it available.
+        device_type = _effective_type(self._manager, self._ieee)
+        self._attr_available = device.available and device_type in (
+            DEVICE_TYPE_SWITCH,
+            None,
         )
-        self._attr_is_on = device.state == "ON"
+        # Until the device reports, show the state it had before.
+        if device.state is None:
+            self._attr_is_on = self._restored_on
+        else:
+            self._attr_is_on = device.state == "ON"
 
     async def async_turn_on(self, **kwargs: Any) -> None:  # noqa: ARG002
         """Turn on the load. Same state write the lights use, minus brightness."""

@@ -2,8 +2,8 @@
 Number platform for Control4 Dimmers.
 
 Exposes the dimming table (c4.dm.tv): ramp rates, level limits and cold start
-values. An entity appears once the converter has read its parameter. Relays get
-none.
+values. An entity appears once the converter has read its parameter, or right
+away when the entity registry shows the device had it before. Relays get none.
 """
 
 from __future__ import annotations
@@ -12,9 +12,9 @@ from typing import TYPE_CHECKING
 
 from homeassistant.components.number import (
     NumberDeviceClass,
-    NumberEntity,
     NumberEntityDescription,
     NumberMode,
+    RestoreNumber,
 )
 from homeassistant.const import PERCENTAGE, EntityCategory, UnitOfTime
 
@@ -94,11 +94,20 @@ async def async_setup_entry(
         for ieee, state in manager.devices.items():
             # Keypads, the outlet and relays have no dimmable load, so a
             # c4_tv_* value from a raw command must not make entities there.
-            if not manager.has_dimming_table(ieee):
+            # Before the type is known (it arrives in the device's state,
+            # which a reload of this integration doesn't bring back), only
+            # the entities the registry remembers are recreated.
+            dimmable = manager.has_dimming_table(ieee)
+            if not dimmable and manager.effective_type(ieee) is not None:
                 continue
             for description in DIMMING_NUMBERS:
                 key = (ieee, description.key)
-                if key in known or f"c4_tv_{description.key}" not in state.raw:
+                if key in known:
+                    continue
+                read = dimmable and f"c4_tv_{description.key}" in state.raw
+                if not read and not manager.is_registered(
+                    "number", f"{ieee}_dimming_{description.key}"
+                ):
                     continue
                 known.add(key)
                 new.append(
@@ -118,8 +127,14 @@ async def async_setup_entry(
     manager.add_listener(_check_new_numbers)
 
 
-class Control4DimmingNumber(NumberEntity):
-    """One writable dimming table parameter."""
+class Control4DimmingNumber(RestoreNumber):
+    """
+    One writable dimming table parameter.
+
+    Shows the last known value until the device reports again (issue #265):
+    the values only arrive in the device's state, and a restart or reload
+    can come long before the device next reports.
+    """
 
     _attr_should_poll = False
     _attr_has_entity_name = True
@@ -137,6 +152,7 @@ class Control4DimmingNumber(NumberEntity):
         self._manager = manager
         self._ieee = ieee_address
         self._unsub_listener: Callable[[], None] | None = None
+        self._restored_value: float | None = None
         self._attr_unique_id = f"{ieee_address}_dimming_{description.key}"
         self._attr_device_info = {
             "identifiers": {(DOMAIN, ieee_address)},
@@ -147,11 +163,11 @@ class Control4DimmingNumber(NumberEntity):
 
     @property
     def native_value(self) -> float | None:
-        """Return the value last read from the device."""
+        """Return the value last read from the device, else the restored one."""
         device = self._manager.devices.get(self._ieee)
-        if device is None:
-            return None
-        return device.raw.get(f"c4_tv_{self.entity_description.key}")
+        key = f"c4_tv_{self.entity_description.key}"
+        value = device.raw.get(key) if device else None
+        return value if value is not None else self._restored_value
 
     async def async_set_native_value(self, value: float) -> None:
         """Write the value to the device; the read-back updates the state."""
@@ -160,7 +176,11 @@ class Control4DimmingNumber(NumberEntity):
         )
 
     async def async_added_to_hass(self) -> None:
-        """Subscribe to manager updates."""
+        """Restore the last value and subscribe to manager updates."""
+        await super().async_added_to_hass()
+        last = await self.async_get_last_number_data()
+        if last is not None:
+            self._restored_value = last.native_value
         self._unsub_listener = self._manager.add_listener(self._on_manager_update)
 
     async def async_will_remove_from_hass(self) -> None:
