@@ -32,7 +32,7 @@ Pairs with a Zigbee2MQTT stack that speaks the Control4 protocol natively
 
 Every Control4 Zigbee device we know of, grouped by what it does. Model numbers come from Control4's data sheets; where Control4 publishes one, the model number links to it.
 
-- **Status**: **Confirmed** (maintainer-tested), **Community confirmed**, **Unknown** (nobody has reported trying it with Zigbee2MQTT yet) or **Not supported**.
+- **Status**: **Confirmed** (maintainer-tested), **Community confirmed**, **Likely** (a restyled version of a confirmed model with the same specs, not tested yet), **Unknown** (nobody has reported trying it with Zigbee2MQTT yet) or **Not supported**.
 - **Voltage variants**: models that differ only in the number at the end (120, 240, 277 or 120277) are the same device built for a different mains voltage, so they share one row. The status comes from whichever voltage has been tested, usually the 120V model.
 - **Zigbee role**: whether the device routes for other devices (Router) or not (End device). "(expected)" means it's inferred from how the device is powered and hasn't been seen on a real network yet.
 
@@ -53,14 +53,14 @@ To move a device to a new Zigbee mesh, use the **13-4-13** factory reset sequenc
 
 The switch works on/off through a `switch` entity (no brightness slider). Units that answer the dim probe are recognised automatically; the rest need `set_device_type` with `switch` (see Troubleshooting).
 
-All newer Control4 Zigbee devices with manufacturer ID `43981` (`0xABCD`) are expected to work, including these Contemporary (`-C`) versions of the models above:
+All newer Control4 Zigbee devices with manufacturer ID `43981` (`0xABCD`) are expected to work, including these Contemporary (`-C`) versions of the models above. Their data sheets describe the same features and load ratings as the originals with a new design and faceplates:
 
 | Model | Status | Type | Zigbee role |
 | ------- | ------- | ------ | -------- |
-| [C4-APD120/240/277-C](https://docs.control4.com/docs/product/wireless-adaptive-phase-dimmer-contemporary/data-sheet/english/latest) | **Unknown** | Adaptive Phase Dimmer, Contemporary | Router (expected) |
-| [C4-KD120/240/277-C](https://docs.control4.com/docs/product/wireless-keypad-dimmer-contemporary/data-sheet/english/latest) | **Unknown** | Keypad Dimmer, Contemporary | Router (expected) |
-| [C4-KC120277/240-C](https://docs.control4.com/docs/product/wireless-configurable-keypad-contemporary/data-sheet/english/latest) | **Unknown** | Configurable Keypad, Contemporary | Router (expected) |
-| [C4-SW120277/240-C](https://docs.control4.com/docs/product/wireless-switch-contemporary/data-sheet/english/latest) | **Unknown** | Switch, Contemporary | Router (expected) |
+| [C4-APD120/240/277-C](https://docs.control4.com/docs/product/wireless-adaptive-phase-dimmer-contemporary/data-sheet/english/latest) | **Likely** | Adaptive Phase Dimmer, Contemporary | Router (expected) |
+| [C4-KD120/240/277-C](https://docs.control4.com/docs/product/wireless-keypad-dimmer-contemporary/data-sheet/english/latest) | **Likely** | Keypad Dimmer, Contemporary | Router (expected) |
+| [C4-KC120277/240-C](https://docs.control4.com/docs/product/wireless-configurable-keypad-contemporary/data-sheet/english/latest) | **Likely** | Configurable Keypad, Contemporary | Router (expected) |
+| [C4-SW120277/240-C](https://docs.control4.com/docs/product/wireless-switch-contemporary/data-sheet/english/latest) | **Likely** | Switch, Contemporary | Router (expected) |
 
 #### Other dimmers and fan controllers
 
