@@ -33,6 +33,7 @@ Pairs with a Zigbee2MQTT stack that speaks the Control4 protocol natively
 Every Control4 Zigbee device we know of, grouped by what it does. Model numbers come from Control4's data sheets; where Control4 publishes one, the product name links to it.
 
 - **Status**: **Confirmed** (maintainer-tested), **Community confirmed**, **Unknown** (nobody has reported trying it with Zigbee2MQTT yet) or **Not supported**.
+- **Voltage variants**: models that differ only in the number at the end (120, 240, 277 or 120277) are the same device built for a different mains voltage, so they share one row. The status comes from whichever voltage has been tested, usually the 120V model.
 - **Zigbee role**: whether the device routes for other devices (Router) or not (End device). "(expected)" means it's inferred from how the device is powered and hasn't been seen on a real network yet.
 
 If you have a device marked **Unknown**, it is recommended you report your experience with it and help expand the capabilities of this integration.
@@ -45,21 +46,17 @@ To move a device to a new Zigbee mesh, use the **13-4-13** factory reset sequenc
 
 | Model | Status | Type | Dimming | LED Control | Buttons | Zigbee role |
 |-------|--------|------|:---:|:---:|:---:|------|
-| C4-APD120 | **Confirmed** | Adaptive Phase Dimmer | Yes | Yes | 2 (rocker) | Router |
-| C4-KD120 | **Confirmed** | Keypad Dimmer | Yes | Yes | 6 (rocker + keypad) | Router |
-| C4-KC120277 | **Confirmed** | Configurable Keypad | N/A | Yes | 6 (configurable slots) | Router (expected) |
-| C4-SW120277 | **Community confirmed** | Switch (on/off) | No | Untested | 2 (rocker) | Router |
+| C4-APD120, C4-APD240, C4-APD277 | **Confirmed** | [Adaptive Phase Dimmer](https://docs.control4.com/docs/product/wireless-adaptive-phase-dimmer/data-sheet/english/latest) | Yes | Yes | 2 (rocker) | Router |
+| C4-KD120, C4-KD240, C4-KD277 | **Confirmed** | [Keypad Dimmer](https://docs.control4.com/docs/product/wireless-keypad-dimmer/data-sheet/english/latest) | Yes | Yes | 6 (rocker + keypad) | Router |
+| C4-KC120277, C4-KC240 | **Confirmed** | [Configurable Keypad](https://docs.control4.com/docs/product/wireless-configurable-keypad/data-sheet/english/latest) | N/A | Yes | 6 (configurable slots) | Router (expected) |
+| C4-SW120277, C4-SW240 | **Community confirmed** | [Switch (on/off)](https://docs.control4.com/docs/product/wireless-switch-120v-277v/data-sheet/english/latest) | No | Untested | 2 (rocker) | Router |
 
-The C4-SW120277 works on/off through a `switch` entity (no brightness slider). Units that answer the dim probe are recognised automatically; the rest need `set_device_type` with `switch` (see Troubleshooting).
+The switch works on/off through a `switch` entity (no brightness slider). Units that answer the dim probe are recognised automatically; the rest need `set_device_type` with `switch` (see Troubleshooting).
 
-All newer Control4 Zigbee devices with manufacturer ID `43981` (`0xABCD`) are expected to work, including these other voltages and Contemporary (`-C`) versions of the models above:
+All newer Control4 Zigbee devices with manufacturer ID `43981` (`0xABCD`) are expected to work, including these Contemporary (`-C`) versions of the models above:
 
 | Model | Status | Type | Zigbee role |
 | ------- | ------- | ------ | -------- |
-| C4-APD240, C4-APD277 | **Unknown** | [Adaptive Phase Dimmer](https://docs.control4.com/docs/product/wireless-adaptive-phase-dimmer/data-sheet/english/latest) (240V, 277V) | Router (expected) |
-| C4-KD240, C4-KD277 | **Unknown** | [Keypad Dimmer](https://docs.control4.com/docs/product/wireless-keypad-dimmer/data-sheet/english/latest) (240V, 277V) | Router (expected) |
-| C4-KC240 | **Unknown** | [Configurable Keypad](https://docs.control4.com/docs/product/wireless-configurable-keypad/data-sheet/english/latest) (240V) | Router (expected) |
-| C4-SW240 | **Unknown** | [Switch](https://docs.control4.com/docs/product/wireless-switch-120v-277v/data-sheet/english/latest) (240V) | Router (expected) |
 | C4-APD120-C, C4-APD240-C, C4-APD277-C | **Unknown** | [Adaptive Phase Dimmer, Contemporary](https://docs.control4.com/docs/product/wireless-adaptive-phase-dimmer-contemporary/data-sheet/english/latest) | Router (expected) |
 | C4-KD120-C, C4-KD240-C, C4-KD277-C | **Unknown** | [Keypad Dimmer, Contemporary](https://docs.control4.com/docs/product/wireless-keypad-dimmer-contemporary/data-sheet/english/latest) | Router (expected) |
 | C4-KC120277-C, C4-KC240-C | **Unknown** | [Configurable Keypad, Contemporary](https://docs.control4.com/docs/product/wireless-configurable-keypad-contemporary/data-sheet/english/latest) | Router (expected) |
@@ -71,7 +68,8 @@ All newer Control4 Zigbee devices with manufacturer ID `43981` (`0xABCD`) are ex
 | ------- | ------- | ------ | -------- |
 | C4-FPD120 | **Unknown** | [Forward Phase Dimmer](https://docs.control4.com/docs/product/wireless-forward-phase-dimmer/data-sheet/english/latest) | Router (expected) |
 | C4-V-FPD120 | **Unknown** | [Essential Forward Phase Dimmer](https://docs.control4.com/docs/product/essential-forward-phase-dimmer-120v-white/data-sheet/english/latest) | Router (expected) |
-| C4-TV120277, C4-TV240, C4-TV120277-C, C4-TV240-C | **Unknown** | [0-10V Dimmer](https://docs.control4.com/docs/product/wireless-0-10v-dimmer/data-sheet/english/latest) (standard and Contemporary) | Router (expected) |
+| C4-TV120277, C4-TV240 | **Unknown** | [0-10V Dimmer](https://docs.control4.com/docs/product/wireless-0-10v-dimmer/data-sheet/english/latest) | Router (expected) |
+| C4-TV120277-C, C4-TV240-C | **Unknown** | [0-10V Dimmer, Contemporary](https://docs.control4.com/docs/product/wireless-0-10v-dimmer-contemporary/data-sheet/english/latest) | Router (expected) |
 | C4-4SF120 | **Unknown** | [Fan Speed Controller](https://docs.control4.com/docs/product/wireless-fan-speed-controller/data-sheet/english/latest) | Router (expected) |
 | C4-DM201-Z, C4-DM201-LW-Z, C4-SM201-Z | **Unknown** | [Puck Dimmer and Switch](https://docs.control4.com/docs/product/puck-dimmer/data-sheet/english/latest) (in-box module, 240V) | Router (expected) |
 
