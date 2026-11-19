@@ -2,7 +2,13 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from unittest.mock import MagicMock, patch
+
+import pytest
+from homeassistant.core import HomeAssistant
+from homeassistant.helpers import entity_registry as er
+from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.control4_dimmers.const import (
     BUTTON_EVENT_TYPES,
@@ -26,6 +32,7 @@ from custom_components.control4_dimmers.sensor import (
     Control4AuditSensor,
     Control4DeviceSensor,
 )
+from custom_components.control4_dimmers.store import Control4Store
 
 from .conftest import IEEE_DIMMER, IEEE_KEYPAD
 
@@ -108,7 +115,7 @@ class TestControl4ButtonEvent:
     def test_on_button_event(self, manager: Control4Manager) -> None:
         entity = self._make_entity(manager)
         entity.async_write_ha_state = MagicMock()
-        entity._on_button_event("pressed")
+        entity._on_button_event("pressed", None)
         entity.async_write_ha_state.assert_called_once()
 
     def test_update_entity_id_on_rename(self, manager: Control4Manager) -> None:
@@ -159,6 +166,29 @@ class TestControl4ButtonEvent:
         assert attrs["led_mode"] == "follow_load"
         assert attrs["ieee_address"] == IEEE_DIMMER
         assert attrs["slot_id"] == 2
+
+    def test_stored_actions_not_exposed(self, manager: Control4Manager) -> None:
+        """Action data can hold secrets; state attributes are world-readable."""
+        manager.store._devices[IEEE_DIMMER] = DeviceConfig(
+            ieee_address=IEEE_DIMMER,
+            friendly_name="Kitchen",
+            device_type="dimmer",
+            slots=[
+                SlotConfig(
+                    slot_id=2,
+                    tap_action={
+                        "action": "alarm_control_panel.alarm_disarm",
+                        "data": {"code": "1234"},
+                    },
+                    double_tap_action={"action": "script.a"},
+                    hold_action={"action": "script.b"},
+                )
+            ],
+        )
+        attrs = self._make_entity(manager, slot_id=2).extra_state_attributes
+        for field in ("tap_action", "double_tap_action", "hold_action"):
+            assert field not in attrs
+        assert "1234" not in repr(attrs)
 
     def test_extra_state_attributes_defaults(self, manager: Control4Manager) -> None:
         entity = self._make_entity(manager, slot_id=3)
@@ -213,12 +243,25 @@ class TestControl4PaddleEvent:
     def test_on_paddle_event(self, manager: Control4Manager) -> None:
         entity = self._make_entity(manager)
         entity.async_write_ha_state = MagicMock()
-        entity._on_paddle_event("pressed")
+        entity._on_paddle_event("pressed", None)
         entity.async_write_ha_state.assert_called_once()
 
 
 class TestEventSetupCreatesPaddles:
     """Tests for paddle entity creation via async_setup_entry."""
+
+    @pytest.fixture(autouse=True)
+    def _stub_entity_registry(self) -> Iterator[None]:
+        """Stub the entity registry, which the mock hass does not carry."""
+        with (
+            patch("custom_components.control4_dimmers.event.er.async_get"),
+            patch(
+                "custom_components.control4_dimmers.event."
+                "er.async_entries_for_config_entry",
+                return_value=[],
+            ),
+        ):
+            yield
 
     async def _run_setup(
         self,
@@ -330,6 +373,198 @@ class TestEventSetupCreatesPaddles:
         uids = {e.unique_id for e in added}
         assert f"{IEEE_DIMMER}_event_paddle_up" in uids
         assert f"{IEEE_DIMMER}_event_paddle_down" in uids
+
+
+# ── Orphaned slot entities after a type change (issue #247) ──────────
+
+
+class TestOrphanedSlotEntities:
+    """A type change removes event entities for slots the device lost."""
+
+    IEEE_OTHER = "0x000fff0000eee001"
+
+    @staticmethod
+    def _uid(ieee: str, slot: int | str) -> str:
+        return f"{ieee}_event_{slot}"
+
+    async def _setup(
+        self, hass: HomeAssistant, *states: DeviceState
+    ) -> tuple[Control4Manager, MockConfigEntry, er.EntityRegistry, list]:
+        """
+        Run the event platform against a real entity registry.
+
+        The registry is pre-seeded, as if left by a previous run, with the
+        full keypad slot set and both paddles for every device, plus the
+        device anchor sensor and an unrelated entity.
+        """
+        entry = MockConfigEntry(domain=DOMAIN, data={"mqtt_topic": "zigbee2mqtt"})
+        entry.add_to_hass(hass)
+        with patch("custom_components.control4_dimmers.store.Store"):
+            store = Control4Store(hass, entry.entry_id)
+        manager = Control4Manager(hass, entry, store)
+        ent_reg = er.async_get(hass)
+        for state in states:
+            ieee = state.ieee_address
+            manager._devices[ieee] = state
+            if state.device_type:
+                # A saved config is what confirms a type for removal.
+                store._devices[ieee] = DeviceConfig(
+                    ieee_address=ieee,
+                    friendly_name=state.friendly_name,
+                    device_type=state.device_type,
+                )
+            for slot in (1, 2, 3, 4, 5, 6, "paddle_up", "paddle_down"):
+                ent_reg.async_get_or_create(
+                    "event", DOMAIN, self._uid(ieee, slot), config_entry=entry
+                )
+            ent_reg.async_get_or_create(
+                "sensor", DOMAIN, f"{ieee}_sensor", config_entry=entry
+            )
+        ent_reg.async_get_or_create("event", "other_integration", "unrelated_1")
+        hass.data[DOMAIN] = {entry.entry_id: {"manager": manager}}
+        added: list = []
+        await event_async_setup_entry(hass, entry, added.extend)
+        return manager, entry, ent_reg, added
+
+    @staticmethod
+    def _retype(manager: Control4Manager, state: DeviceState, new_type: str) -> None:
+        """Change a device's type the way a saved detection would."""
+        state.device_type = new_type
+        manager.store._devices[state.ieee_address].device_type = new_type
+        manager.notify_listeners()
+
+    def _event_uids(self, ent_reg: er.EntityRegistry, ieee: str) -> set[str]:
+        prefix = f"{ieee}_event_"
+        return {
+            e.unique_id
+            for e in ent_reg.entities.values()
+            if e.domain == "event" and e.unique_id.startswith(prefix)
+        }
+
+    async def test_keypaddim_to_dimmer_removes_orphaned_slots(
+        self, hass: HomeAssistant
+    ) -> None:
+        state = DeviceState(
+            ieee_address=IEEE_DIMMER,
+            friendly_name="Kitchen",
+            model_id="C4-KD120",
+            device_type="keypaddim",
+        )
+        other = DeviceState(
+            ieee_address=self.IEEE_OTHER,
+            friendly_name="Theater",
+            model_id="C4-KC120277",
+            device_type="keypad",
+        )
+        manager, entry, ent_reg, added = await self._setup(hass, state, other)
+        # A keypad dimmer has all six slots and both paddles: nothing goes.
+        assert self._event_uids(ent_reg, IEEE_DIMMER) == {
+            self._uid(IEEE_DIMMER, s)
+            for s in (1, 2, 3, 4, 5, 6, "paddle_up", "paddle_down")
+        }
+        assert len(added) == 8 + 6
+
+        # Reclassified as a plain dimmer: only slots 2 and 5 remain.
+        self._retype(manager, state, "dimmer")
+        assert self._event_uids(ent_reg, IEEE_DIMMER) == {
+            self._uid(IEEE_DIMMER, s) for s in (2, 5, "paddle_up", "paddle_down")
+        }
+        # The other device only lost the paddles a pure keypad never has;
+        # its six button slots, both anchor sensors and the unrelated
+        # entity are untouched.
+        assert self._event_uids(ent_reg, self.IEEE_OTHER) == {
+            self._uid(self.IEEE_OTHER, s) for s in (1, 2, 3, 4, 5, 6)
+        }
+        assert ent_reg.async_get_entity_id("sensor", DOMAIN, f"{IEEE_DIMMER}_sensor")
+        assert ent_reg.async_get_entity_id("event", "other_integration", "unrelated_1")
+        assert len(er.async_entries_for_config_entry(ent_reg, entry.entry_id)) == (
+            4 + 6 + 2
+        )
+
+    async def test_removed_slots_come_back_when_type_flips_back(
+        self, hass: HomeAssistant
+    ) -> None:
+        state = DeviceState(
+            ieee_address=IEEE_DIMMER,
+            friendly_name="Kitchen",
+            model_id="C4-KD120",
+            device_type="keypaddim",
+        )
+        manager, _entry, ent_reg, added = await self._setup(hass, state)
+        self._retype(manager, state, "dimmer")
+        assert self._uid(IEEE_DIMMER, 1) not in self._event_uids(ent_reg, IEEE_DIMMER)
+        before = len(added)
+
+        self._retype(manager, state, "keypaddim")
+        new_uids = {e.unique_id for e in added[before:]}
+        assert new_uids == {self._uid(IEEE_DIMMER, s) for s in (1, 3, 4, 6)}
+
+    async def test_switch_recognized_from_keypaddim_keeps_rocker_slots(
+        self, hass: HomeAssistant
+    ) -> None:
+        """A relay first typed keypaddim, then switch, keeps slots 2 and 6."""
+        state = DeviceState(
+            ieee_address=IEEE_DIMMER,
+            friendly_name="Bath Fan",
+            model_id="C4-SW120277",
+            device_type="keypaddim",
+        )
+        manager, _entry, ent_reg, _added = await self._setup(hass, state)
+        self._retype(manager, state, "switch")
+        assert self._event_uids(ent_reg, IEEE_DIMMER) == {
+            self._uid(IEEE_DIMMER, s) for s in (2, 6, "paddle_up", "paddle_down")
+        }
+
+    async def test_stored_type_override_drives_the_slot_list(
+        self, hass: HomeAssistant
+    ) -> None:
+        state = DeviceState(
+            ieee_address=IEEE_DIMMER,
+            friendly_name="Kitchen",
+            model_id="C4-KD120",
+            device_type="keypaddim",
+        )
+        manager, _entry, ent_reg, _added = await self._setup(hass, state)
+        manager.store._devices[IEEE_DIMMER] = DeviceConfig(
+            ieee_address=IEEE_DIMMER,
+            friendly_name="Kitchen",
+            device_type="keypaddim",
+            device_type_override="keypad",
+        )
+        manager.notify_listeners()
+        # A pure keypad has no load, so the paddle halves go.
+        assert self._event_uids(ent_reg, IEEE_DIMMER) == {
+            self._uid(IEEE_DIMMER, s) for s in (1, 2, 3, 4, 5, 6)
+        }
+
+    async def test_live_type_alone_never_removes_entities(
+        self, hass: HomeAssistant
+    ) -> None:
+        """A c4_device_type from MQTT, with nothing stored, removes nothing."""
+        state = DeviceState(
+            ieee_address=IEEE_DIMMER,
+            friendly_name="Kitchen",
+            model_id="C4-KD120",
+            device_type=None,
+        )
+        manager, _entry, ent_reg, _added = await self._setup(hass, state)
+        state.update_from_mqtt({"c4_device_type": "dimmer"})
+        manager.notify_listeners()
+        assert len(self._event_uids(ent_reg, IEEE_DIMMER)) == 8
+
+    async def test_undetected_device_keeps_restored_entities(
+        self, hass: HomeAssistant
+    ) -> None:
+        """Nothing is removed while a device's type is still unknown."""
+        state = DeviceState(
+            ieee_address=IEEE_DIMMER,
+            friendly_name="Kitchen",
+            model_id="C4-APD120",
+            device_type=None,
+        )
+        _manager, _entry, ent_reg, added = await self._setup(hass, state)
+        assert added == []
+        assert len(self._event_uids(ent_reg, IEEE_DIMMER)) == 8
 
 
 # ── Sensor anchor entity ─────────────────────────────────────────────

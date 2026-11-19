@@ -22,6 +22,69 @@ const DOMAIN = "control4_dimmers";
 const CARD_TAG = "control4-dimmer-card";
 const EDITOR_TAG = "control4-dimmer-card-editor";
 
+/* ────────────────────── escaping ────────────────────── */
+
+const HTML_ESCAPES = { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" };
+
+/**
+ * Escape a value for interpolation into an HTML string, as text or inside
+ * a quoted attribute. Every innerHTML template below runs values that did
+ * not originate in this file (entity and device names, slot names, icons,
+ * card config strings, error messages) through this.
+ */
+function esc(value) {
+  return String(value ?? "").replace(/[&<>"']/g, (c) => HTML_ESCAPES[c]);
+}
+
+const HEX_COLOR_RE = /^#?([0-9a-fA-F]{6})$/;
+
+/**
+ * Validate a color before it goes into a style attribute. Returns the bare
+ * six-digit hex, or the fallback when the value is not one. Colors land in
+ * CSS, where escaping alone is not enough, so they are validated instead.
+ */
+function safeHex(value, fallback = null) {
+  const m = HEX_COLOR_RE.exec(String(value ?? ""));
+  return m ? m[1] : fallback;
+}
+
+/**
+ * Paint an LED element through the CSSOM. The color is validated first, so
+ * a stored value that is not six-digit hex shows as off instead of being
+ * handed to CSS. Returns the hex actually used.
+ */
+function setLedColor(el, color) {
+  const hex = safeHex(color, "000000");
+  el.style.background = `#${hex}`;
+  return hex;
+}
+
+/** Own-property lookup, so a key like "constructor" never hits Object.prototype. */
+function ownGet(obj, key) {
+  return typeof key === "string" && Object.hasOwn(obj, key) ? obj[key] : undefined;
+}
+
+/** Clamp a stored slot size to what fits between its slot and the last one. */
+function clampSize(size, slotId, slots) {
+  const max = Math.max(1, Math.max(...slots) - slotId + 1);
+  const n = Number.isInteger(size) ? size : parseInt(size, 10);
+  return Number.isInteger(n) ? Math.min(Math.max(n, 1), max) : 1;
+}
+
+/** Selector for an element carrying a data-slot value, safely escaped. */
+function slotSelector(prefix, slotId) {
+  return `${prefix}[data-slot="${CSS.escape(String(slotId))}"]`;
+}
+
+/**
+ * Whether an entity was created by this integration. Device pickers and
+ * the grid only list these, so another integration's entity that happens
+ * to carry an ieee_address attribute is never treated as a Control4 device.
+ */
+function isOwnEntity(hass, entityId) {
+  return hass?.entities?.[entityId]?.platform === DOMAIN;
+}
+
 /* ────────────────────── version sync ────────────────────── */
 
 const RESOURCE_URL = (() => {
@@ -99,11 +162,12 @@ function faceplateForeground(hex) {
 
 /** Build the chassis inline-style vars for a faceplate color (empty when none). */
 function faceplateChassisStyle(hex, prefix = "--c4-btn") {
-  if (!hex) return "";
-  const fg = faceplateForeground(hex);
-  const bc = faceplateButtonColor(hex);
+  const safe = safeHex(hex);
+  if (!safe) return "";
+  const fg = faceplateForeground(safe);
+  const bc = faceplateButtonColor(safe);
   return [
-    `background:#${hex}`,
+    `background:#${safe}`,
     `${prefix}-bg:#${bc}`,
     `${prefix}-border:${fg.border}`,
     `${prefix}-text:${fg.text}`,
@@ -134,33 +198,40 @@ const DOMAIN_ICONS = {
 
 /** Format an HA-native action as chip HTML matching HA's automation UI style */
 function actionChipsHtml(action, hass) {
-  if (!action) return null;
-  const service = action.action || "";
+  if (!action || typeof action !== "object") return null;
+  const service = typeof action.action === "string" ? action.action : "";
   const [domain, svcName] = service.includes(".") ? service.split(".", 2) : ["", service];
   const domainLabel = domain.charAt(0).toUpperCase() + domain.slice(1);
   const svcLabel = svcName.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
-  const svcIcon = DOMAIN_ICONS[domain] || "mdi:cog";
+  const svcIcon = ownGet(DOMAIN_ICONS, domain) || "mdi:cog";
   const serviceChip = `
     <span class="action-chip service-chip">
-      <ha-icon icon="${svcIcon}"></ha-icon>
-      ${domainLabel} '${svcLabel}'
+      <ha-icon icon="${esc(svcIcon)}"></ha-icon>
+      ${esc(domainLabel)} '${esc(svcLabel)}'
     </span>`;
 
-  const entityId = (action.target || {}).entity_id || "";
-  let entityChip = "";
-  if (entityId) {
+  // target.entity_id may be one id or a list of them.
+  const target = action.target && typeof action.target === "object" ? action.target : {};
+  const entityIds = [].concat(target.entity_id ?? []).filter((e) => typeof e === "string" && e);
+  const entityChips = entityIds.map((entityId) => {
     const entityName = entityId === "__self_load__"
       ? "This Device"
       : (hass?.states[entityId]?.attributes?.friendly_name || entityId);
     const stateObj = entityId !== "__self_load__" && hass?.states[entityId];
-    const entityIcon = stateObj?.attributes?.icon || DOMAIN_ICONS[entityId.split(".")[0]] || "mdi:eye";
-    entityChip = `
+    const entityIcon = stateObj?.attributes?.icon || ownGet(DOMAIN_ICONS, entityId.split(".")[0]) || "mdi:eye";
+    return `
       <span class="action-chip entity-chip">
-        <ha-icon icon="${entityIcon}"></ha-icon>
-        ${entityName}
+        <ha-icon icon="${esc(entityIcon)}"></ha-icon>
+        ${esc(entityName)}
       </span>`;
-  }
-  return serviceChip + entityChip;
+  }).join("");
+
+  // The action also sends data the chips above don't show; say so, so a
+  // reviewer knows there is more to it than the service and target.
+  const hasData = action.data && typeof action.data === "object" && Object.keys(action.data).length > 0;
+  const dataChip = hasData ? `
+      <span class="action-chip data-chip">${esc("+ data")}</span>` : "";
+  return serviceChip + entityChips + dataChip;
 }
 
 const LED_MODES = [
@@ -714,8 +785,9 @@ const EDITOR_STYLES = `
 /* ────────────────────── helpers ────────────────────── */
 
 function hexToInputColor(hex) {
-  if (!hex || hex === "000000") return "#000000";
-  return "#" + hex.replace("#", "").padStart(6, "0");
+  const h = String(hex ?? "").replace("#", "");
+  if (!/^[0-9a-fA-F]{1,6}$/.test(h)) return "#000000";
+  return "#" + h.padStart(6, "0");
 }
 
 function inputColorToHex(val) {
@@ -734,7 +806,7 @@ function ledRingStyle(hex) {
 }
 
 function computeLayout(slotConfigs, deviceType) {
-  const meta = DEVICE_TYPES[deviceType];
+  const meta = ownGet(DEVICE_TYPES, deviceType);
   if (!meta) return [];
   const activeSlots = meta.slots;
 
@@ -754,7 +826,7 @@ function computeLayout(slotConfigs, deviceType) {
   const sorted = [...slotConfigs].sort((a, b) => a.slot_id - b.slot_id);
   for (const cfg of sorted) {
     if (used.has(cfg.slot_id) || !activeSlots.includes(cfg.slot_id)) continue;
-    const btn = { startSlot: cfg.slot_id, size: cfg.size || 1, slots: [cfg] };
+    const btn = { startSlot: cfg.slot_id, size: clampSize(cfg.size, cfg.slot_id, activeSlots), slots: [cfg] };
     used.add(cfg.slot_id);
     for (let i = 1; i < btn.size; i++) used.add(cfg.slot_id + i);
     buttons.push(btn);
@@ -774,7 +846,7 @@ function computeLayout(slotConfigs, deviceType) {
 }
 
 function defaultSlotsForType(deviceType) {
-  const meta = DEVICE_TYPES[deviceType];
+  const meta = ownGet(DEVICE_TYPES, deviceType);
   if (!meta) return [];
   if (deviceType === "dimmer" || deviceType === "switch") {
     const [top, bottom] = meta.slots;
@@ -836,7 +908,7 @@ class Control4Card extends HTMLElement {
     if (first) this._checkVersion();
 
     const entityId = this._config.entity;
-    if (entityId && hass.states[entityId]) {
+    if (entityId && hass.states[entityId] && isOwnEntity(hass, entityId)) {
       const newState = hass.states[entityId].last_updated;
       const ieee = hass.states[entityId].attributes?.ieee_address;
       if (newState !== this._lastEntityState || (!this._deviceInfo && ieee)) {
@@ -867,13 +939,13 @@ class Control4Card extends HTMLElement {
             ? (slot.led_on_color || "ffffff")
             : (slot.led_off_color || "000000");
           const btn = this.shadowRoot.querySelector(
-            `.chassis-btn[data-slot="${slot.slot_id}"]`
+            slotSelector(".chassis-btn", slot.slot_id)
           );
           if (btn) {
             const led = btn.querySelector(".led");
             if (led) {
-              led.style.background = `#${color}`;
-              led.style.visibility = color === "000000" ? "hidden" : "";
+              const hex = setLedColor(led, color);
+              led.style.visibility = hex === "000000" ? "hidden" : "";
             }
           }
         }
@@ -898,12 +970,12 @@ class Control4Card extends HTMLElement {
       if (!targetState) continue;
       const isOn = targetState.state === "on";
       const color = isOn ? (slot.led_on_color || "ffffff") : (slot.led_off_color || "000000");
-      const btn = this.shadowRoot.querySelector(`.chassis-btn[data-slot="${slot.slot_id}"]`);
+      const btn = this.shadowRoot.querySelector(slotSelector(".chassis-btn", slot.slot_id));
       if (btn) {
         const led = btn.querySelector(".led");
         if (led) {
-          led.style.background = `#${color}`;
-          led.style.visibility = color === "000000" ? "hidden" : "";
+          const hex = setLedColor(led, color);
+          led.style.visibility = hex === "000000" ? "hidden" : "";
         }
       }
     }
@@ -1021,23 +1093,11 @@ class Control4Card extends HTMLElement {
 
   _findLightEntityId() {
     if (!this._hass || !this._deviceInfo) return null;
-    const friendlyName = this._deviceInfo.friendly_name;
-    const ieee = this._deviceInfo.ieee_address;
-    // A relay-only switch owns its load entity (switch.<name>_load); prefer
-    // it over Z2M's light so more-info never shows a brightness slider.
-    if (this._getEffectiveType() === "switch") {
-      for (const [eid, state] of Object.entries(this._hass.states)) {
-        if (eid.startsWith("switch.") && state.attributes?.ieee_address === ieee) {
-          return eid;
-        }
-      }
-    }
-    for (const [eid, state] of Object.entries(this._hass.states)) {
-      if (eid.startsWith("light.") && state.attributes?.friendly_name === friendlyName) {
-        return eid;
-      }
-    }
-    return null;
+    // The backend resolves the load entity through Home Assistant's
+    // registries (this integration's own switch for a relay, Zigbee2MQTT's
+    // light otherwise), so the card never matches entities by name.
+    const eid = this._deviceInfo.load_entity_id;
+    return typeof eid === "string" && this._hass.states[eid] ? eid : null;
   }
 
   _openMoreInfo(entityId) {
@@ -1082,7 +1142,7 @@ class Control4Card extends HTMLElement {
         ` : `
           <div class="card-header">
             ${hasLoad ? `<ha-icon class="entity-icon" icon="${hasDimmer ? "mdi:lightbulb" : "mdi:toggle-switch"}" style="${iconStyle}"></ha-icon>` : ""}
-            <div class="name">${dev.friendly_name}</div>
+            <div class="name">${esc(dev.friendly_name)}</div>
           </div>
 
           <div class="chassis" style="${faceplateChassisStyle(dev.config?.faceplate_color || this._config.faceplate_color)}">
@@ -1092,12 +1152,12 @@ class Control4Card extends HTMLElement {
               const sizeMultiplier = totalSlots < 6 ? Math.floor(6 / totalSlots) : 1;
               return layout.map((btn) => {
                 const cfg = btn.slots[0];
-                const color = ledColor(cfg, devState);
+                const color = safeHex(ledColor(cfg, devState), DEFAULT_COLORS.off);
                 const visualSize = btn.size * sizeMultiplier;
                 return `
-                  <div class="chassis-btn size-${visualSize}" data-slot="${btn.startSlot}">
+                  <div class="chassis-btn size-${esc(visualSize)}" data-slot="${esc(btn.startSlot)}">
                     <div class="btn-inner">
-                      <span class="btn-label">${cfg.name || `Button ${btn.startSlot}`}</span>
+                      <span class="btn-label">${esc(cfg.name || `Button ${btn.startSlot}`)}</span>
                       <div class="led" style="background:#${color}; ${ledRingStyle(color)}; ${color === "000000" ? "visibility:hidden" : ""}"></div>
                     </div>
                   </div>
@@ -1133,8 +1193,7 @@ class Control4Card extends HTMLElement {
         el.classList.add("pressing");
         // Flash LED to on-color during press
         if (led && slot) {
-          const onColor = slot.led_on_color || "ffffff";
-          led.style.background = `#${onColor}`;
+          setLedColor(led, slot.led_on_color || "ffffff");
           led.style.visibility = "";
         }
         setTimeout(() => el.classList.remove("pressing"), 180);
@@ -1198,7 +1257,7 @@ class Control4CardEditor extends HTMLElement {
     if (!this._hass) return [];
     return Object.keys(this._hass.states)
       .filter((eid) => {
-        if (!eid.startsWith("sensor.")) return false;
+        if (!eid.startsWith("sensor.") || !isOwnEntity(this._hass, eid)) return false;
         const attrs = this._hass.states[eid]?.attributes;
         return attrs?.ieee_address != null && (attrs?.device_type != null || attrs?.detected_type != null);
       })
@@ -1304,7 +1363,7 @@ class Control4CardEditor extends HTMLElement {
       const root = this.shadowRoot;
       const displayName = value || `Button ${slotId}`;
       // Update the chassis button label on the left.
-      const slotEl = root?.querySelector(`.chassis-slot[data-slot="${slotId}"]`);
+      const slotEl = root?.querySelector(slotSelector(".chassis-slot", slotId));
       if (slotEl) {
         const label = slotEl.querySelector(".slot-label");
         if (label) label.textContent = displayName;
@@ -1320,16 +1379,15 @@ class Control4CardEditor extends HTMLElement {
     // killing the native color picker dialog with a full re-render.
     if (field === "led_on_color" || field === "led_off_color") {
       const root = this.shadowRoot;
-      const slotEl = root?.querySelector(`.chassis-slot[data-slot="${slotId}"]`);
+      const slotEl = root?.querySelector(slotSelector(".chassis-slot", slotId));
       if (slotEl) {
         const dot = slotEl.querySelector(".led-dot");
         if (dot) {
           // Match the main render: show the at-rest color, not the
           // press / active color, and hide black dots so the editor
           // preview matches the dashboard preview and the physical LED.
-          const color = ledColor(slot, this._deviceInfo?.state);
-          dot.style.background = `#${color}`;
-          dot.style.visibility = color === "000000" ? "hidden" : "";
+          const hex = setLedColor(dot, ledColor(slot, this._deviceInfo?.state));
+          dot.style.visibility = hex === "000000" ? "hidden" : "";
         }
       }
       const saveBtn = root?.getElementById("save-btn");
@@ -1343,7 +1401,7 @@ class Control4CardEditor extends HTMLElement {
 
   _setSlotSize(startSlot, newSize) {
     const effectiveType = this._getEffectiveType();
-    const meta = DEVICE_TYPES[effectiveType];
+    const meta = ownGet(DEVICE_TYPES, effectiveType);
     if (!meta || meta.fixedLayout) return;
 
     const maxSlot = Math.max(...meta.slots);
@@ -1449,7 +1507,7 @@ class Control4CardEditor extends HTMLElement {
     const dev = this._deviceInfo;
     const effectiveType = this._getEffectiveType();
     const layout = computeLayout(this._localSlots, effectiveType);
-    const typeMeta = DEVICE_TYPES[effectiveType] || DEVICE_TYPES.keypad;
+    const typeMeta = ownGet(DEVICE_TYPES, effectiveType) || DEVICE_TYPES.keypad;
     const selectedSlot = this._localSlots.find((s) => s.slot_id === this._selectedSlotId);
     const entityAttrs = this._hass?.states[this._config.entity]?.attributes;
     const detectedType = dev?.device_type || entityAttrs?.detected_type || null;
@@ -1464,8 +1522,8 @@ class Control4CardEditor extends HTMLElement {
           <select id="entity-select">
             <option value="">-- Select --</option>
             ${entities.map((e) => `
-              <option value="${e.entity_id}" ${this._config.entity === e.entity_id ? "selected" : ""}>
-                ${e.display_name}
+              <option value="${esc(e.entity_id)}" ${this._config.entity === e.entity_id ? "selected" : ""}>
+                ${esc(e.display_name)}
               </option>
             `).join("")}
           </select>
@@ -1533,11 +1591,11 @@ class Control4CardEditor extends HTMLElement {
                 // color is black so the editor matches the dashboard
                 // (which suppresses black LEDs to represent the
                 // physically-off state).
-                const color = ledColor(cfg, dev?.state);
+                const color = safeHex(ledColor(cfg, dev?.state), DEFAULT_COLORS.off);
                 const hidden = color === "000000" ? "visibility:hidden" : "";
                 return `
-                  <div class="chassis-slot size-${btn.size} ${isSelected ? "selected" : ""}" data-slot="${btn.startSlot}">
-                    <span class="slot-label">${cfg.name || `Button ${btn.startSlot}`}</span>
+                  <div class="chassis-slot size-${esc(btn.size)} ${isSelected ? "selected" : ""}" data-slot="${esc(btn.startSlot)}">
+                    <span class="slot-label">${esc(cfg.name || `Button ${btn.startSlot}`)}</span>
                     <div class="led-dot" style="background:#${color}; ${ledRingStyle(color)}; ${hidden}"></div>
                   </div>
                 `;
@@ -1554,7 +1612,7 @@ class Control4CardEditor extends HTMLElement {
           </div>
 
           <!-- Save / Reset -->
-          ${this._saveError ? `<div class="save-error">${this._saveError}</div>` : ""}
+          ${this._saveError ? `<div class="save-error">${esc(this._saveError)}</div>` : ""}
           <div class="save-bar">
             <button class="btn-reset" id="reset-btn" ${!this._dirty ? "disabled" : ""}>Reset</button>
             <button class="btn-save" id="save-btn" ${!this._dirty || this._saving ? "disabled" : ""}>
@@ -1595,7 +1653,7 @@ class Control4CardEditor extends HTMLElement {
         ` : ""}
         <div class="config-row">
           <label>Name</label>
-          <input type="text" id="slot-name" value="${slot.name || ""}" placeholder="Button ${slot.slot_id}">
+          <input type="text" id="slot-name" value="${esc(slot.name || "")}" placeholder="Button ${esc(slot.slot_id)}">
         </div>
 
         ${showLoadOptions ? `
@@ -1921,7 +1979,7 @@ class Control4DimmerGrid extends HTMLElement {
     if (!this._hass) return [];
     return Object.keys(this._hass.states)
       .filter((eid) => {
-        if (!eid.startsWith("sensor.")) return false;
+        if (!eid.startsWith("sensor.") || !isOwnEntity(this._hass, eid)) return false;
         const attrs = this._hass.states[eid]?.attributes;
         return attrs?.ieee_address != null && (attrs?.device_type != null || attrs?.detected_type != null);
       })
@@ -1947,8 +2005,14 @@ class Control4DimmerGrid extends HTMLElement {
       if (!newIds.has(eid)) this._cards.delete(eid);
     }
 
-    for (const card of this._cards.values()) {
-      card.hass = this._hass;
+    // One device card that throws (bad stored data, a frontend bug) must
+    // not stop every card after it from updating.
+    for (const [eid, card] of this._cards) {
+      try {
+        card.hass = this._hass;
+      } catch (err) {
+        console.error(`control4-dimmer-grid: card for ${eid} failed to update`, err);
+      }
     }
 
     this._render();
@@ -1957,7 +2021,10 @@ class Control4DimmerGrid extends HTMLElement {
   _render() {
     if (!this.shadowRoot) return;
 
-    const maxCols = this._config.columns || 4;
+    // columns lands inside a <style> block, so it is validated as a
+    // positive integer rather than escaped.
+    const cols = parseInt(this._config.columns, 10);
+    const maxCols = Number.isInteger(cols) && cols > 0 ? cols : 4;
     const grid = this.shadowRoot.getElementById("grid");
     if (grid && grid.childElementCount === this._cards.size) return;
 
@@ -1980,7 +2047,7 @@ class Control4DimmerGrid extends HTMLElement {
         }
       </style>
       <ha-card>
-        ${title ? `<div class="grid-title">${title}</div>` : ""}
+        ${title ? `<div class="grid-title">${esc(title)}</div>` : ""}
         <div class="grid-container" id="grid"></div>
       </ha-card>
     `;
@@ -2019,7 +2086,7 @@ class Control4DimmerGridEditor extends HTMLElement {
     if (!this._hass) return [];
     return Object.keys(this._hass.states)
       .filter((eid) => {
-        if (!eid.startsWith("sensor.")) return false;
+        if (!eid.startsWith("sensor.") || !isOwnEntity(this._hass, eid)) return false;
         const attrs = this._hass.states[eid]?.attributes;
         return attrs?.ieee_address != null && (attrs?.device_type != null || attrs?.detected_type != null);
       })
@@ -2099,11 +2166,11 @@ class Control4DimmerGridEditor extends HTMLElement {
 
       <div class="config-row">
         <label>Title</label>
-        <input type="text" id="grid-title" value="${this._config.title || ""}" placeholder="Control4 Dimmers">
+        <input type="text" id="grid-title" value="${esc(this._config.title || "")}" placeholder="Control4 Dimmers">
       </div>
       <div class="config-row">
         <label>Columns</label>
-        <input type="number" id="grid-columns" value="${this._config.columns || 4}" min="1" max="6" style="width:60px;flex:none">
+        <input type="number" id="grid-columns" value="${esc(this._config.columns || 4)}" min="1" max="6" style="width:60px;flex:none">
       </div>
 
       ${entities.length === 0 ? `
@@ -2111,12 +2178,12 @@ class Control4DimmerGridEditor extends HTMLElement {
       ` : `
         <div class="tabs" id="tabs">
           ${entities.map((e, i) => `
-            <button class="tab ${i === this._selectedTab ? "active" : ""}" data-idx="${i}" title="${e.name}">
+            <button class="tab ${i === this._selectedTab ? "active" : ""}" data-idx="${i}" title="${esc(e.name)}">
               ${i + 1}
             </button>
           `).join("")}
         </div>
-        <div class="device-name">${selected?.name || ""}</div>
+        <div class="device-name">${esc(selected?.name || "")}</div>
         <div class="sub-editor-container" id="sub-editor"></div>
       `}
     `;

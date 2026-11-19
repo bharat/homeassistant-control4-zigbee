@@ -3,6 +3,7 @@
 [![Tests](https://github.com/bharat/homeassistant-control4-zigbee/actions/workflows/test.yml/badge.svg?branch=main)](https://github.com/bharat/homeassistant-control4-zigbee/actions/workflows/test.yml?query=branch%3Amain)
 [![Validate](https://github.com/bharat/homeassistant-control4-zigbee/actions/workflows/validate.yml/badge.svg?branch=main)](https://github.com/bharat/homeassistant-control4-zigbee/actions/workflows/validate.yml?query=branch%3Amain)
 [![Lint](https://github.com/bharat/homeassistant-control4-zigbee/actions/workflows/lint.yml/badge.svg?branch=main)](https://github.com/bharat/homeassistant-control4-zigbee/actions/workflows/lint.yml?query=branch%3Amain)
+[![HACS Default](https://img.shields.io/badge/HACS-Default-41BDF5.svg)](https://github.com/hacs/integration)
 
 > **Background:** Control4 ships solid Zigbee dimmers and keypads. This
 > project bridges them into Home Assistant alongside other Zigbee devices,
@@ -23,6 +24,8 @@ Pairs with a Zigbee2MQTT stack that speaks the Control4 protocol natively
 - Trigger automations from physical button events (`pressed`, `released`, `single_tap`, `double_tap`, `triple_tap`) exposed as HA event entities.
 - Auto-detect device type (dimmer, keypad dimmer, or pure keypad) at pairing time.
 - Read stored LED colors from device firmware so dimmers retain their existing C4 colors.
+- See each load's power, voltage, current, apparent power and power factor, measured by the device itself.
+- Adjust dimming settings (ramp times, default/minimum/maximum level, cold start) from HA.
 - Send raw C4 text protocol commands for experimentation and debugging.
 
 ## Supported Devices
@@ -70,11 +73,35 @@ These devices are not Control4 dimmers, but they all use Zigbee. If you have one
 
 ## Installation
 
-### HA Custom Component
+### Through HACS (recommended)
 
-Install the `custom_components/control4_dimmers` directory into your Home
-Assistant `custom_components/` folder and restart. The integration auto-discovers
-Control4 devices from Zigbee2MQTT and provides:
+The integration is in the HACS default store, so there is nothing to add by
+hand:
+
+1. Open HACS in Home Assistant.
+2. Search for **Control4 Zigbee** and open it.
+3. Click **Download** and confirm.
+4. Restart Home Assistant.
+5. Go to **Settings > Devices & services > Add integration**, search for
+   **Control4 Zigbee**, and enter your Zigbee2MQTT base topic (usually
+   `zigbee2mqtt`).
+
+HACS installs the versioned zip attached to each GitHub release, so the
+version shown in Home Assistant matches the release tag. Updates show up in
+HACS like any other integration.
+
+### Manual install
+
+Download `control4_dimmers.zip` from the
+[latest release](https://github.com/bharat/homeassistant-control4-zigbee/releases/latest),
+unzip it into your Home Assistant `custom_components/control4_dimmers/`
+folder, and restart Home Assistant. Then add the integration as in step 5
+above.
+
+### What the integration provides
+
+The integration auto-discovers Control4 devices from Zigbee2MQTT and
+provides:
 
 - **Lovelace card** with an entities-card-style header, per-button LED
   indicators, and click-to-open light control.
@@ -85,14 +112,14 @@ Control4 devices from Zigbee2MQTT and provides:
 - **Light entities** for dimmers with brightness control via the native HA
   more-info dialog.
 
-### Installed through HACS before November 2026?
+### Added this repository as a custom repository earlier?
 
-This repository was renamed from `homeassistant-control4-dimmers` to
-`homeassistant-control4-zigbee`. Your installed integration keeps working, and
-the integration domain (`control4_dimmers`) is unchanged, so entities and
-automations are unaffected. To keep getting updates, remove the old custom
-repository in HACS and add `https://github.com/bharat/homeassistant-control4-zigbee`
-in its place (category: Integration). The installed files stay put while you do.
+If you added `bharat/homeassistant-control4-zigbee` (or its old name,
+`bharat/homeassistant-control4-dimmers`) as a custom repository in HACS,
+remove that custom repository entry in HACS. The installed integration keeps
+working and now updates from the default store. The integration domain
+(`control4_dimmers`) is unchanged, so entities and automations are
+unaffected.
 
 ## Migrating a Device from Control4
 
@@ -278,6 +305,12 @@ no brightness slider. If one of yours was previously exposed as a light,
 the light entity is gone and the switch entity replaces it; update any
 automations or dashboards that referenced the old entity id.
 
+If a device's type changes (for example a keypad dimmer that was detected
+as a dimmer before Zigbee2MQTT knew its model), button entities it no
+longer has are removed, but the ones it keeps keep their existing entity
+ids, such as `event.<ieee>_button_2` rather than `event.<ieee>_top`. They
+keep working; rename them in Home Assistant if you want the new names.
+
 ### Paddle events and 3-way auxiliary switches
 
 Each load-bearing device gets two event entities, **Paddle Up** and **Paddle Down**, which fire with the same event types as the buttons. They stay `unknown` if nothing reports on them. They need a Zigbee2MQTT image whose converter reports these presses as `paddle_up` / `paddle_down`; older converters report them as `button_8` / `button_9`, which the integration ignores.
@@ -291,6 +324,36 @@ trigger:
   platform: state
   entity_id: event.office_hallway_paddle_down
 ```
+
+### Power readings and dimming settings
+
+These need a Zigbee2MQTT image whose Control4 converter publishes `c4_load_*` and `c4_tv_*` (see [zigbee2mqtt-control4](https://github.com/bharat/zigbee2mqtt-control4)). With an older image the entities are simply never created or never get a value.
+
+**Power sensors** appear on every device with a load (dimmers, keypad dimmers and relay switches) the first time it reports a reading:
+
+| Sensor | Unit | Enabled by default |
+|--------|------|--------------------|
+| Power | W | Yes |
+| Voltage | V | Yes |
+| Current | mA | Yes |
+| Apparent power | VA | Yes |
+| Power factor | 0 to 1 | Yes |
+| Load field 9, Load field 10 | none | No (diagnostic; meaning not confirmed yet) |
+
+The device pushes a reading when its load changes (on, off, or a new level), so a light that stays on keeps its last reading. Readings can't be polled. The first reading right after turning on can be low; the next one settles. After a restart or integration reload, each sensor shows its last reading until the device reports again.
+
+**Dimming settings** are number entities in each dimmer's Configuration section. They are disabled by default, so enable the ones you want first:
+
+| Setting | Unit |
+|---------|------|
+| Default on level | % |
+| Click ramp up / Click ramp down | ms |
+| Hold ramp up / Hold ramp down | ms |
+| Maximum level / Minimum level | % |
+| Cold start time | ms |
+| Cold start level | % |
+
+The integration reads each device's dimming table once and Zigbee2MQTT keeps the values, so restarting HA doesn't read them again (a device that has never answered the read is asked again after each restart). Changing a setting writes it to the device and reads it back. Only dimmers and keypad dimmers get dimming settings: relay switches (C4-SW120277), keypads and the outlet have no load to dim.
 
 ### Troubleshooting
 
@@ -385,6 +448,60 @@ trigger:
   [zigbee2mqtt-control4#3](https://github.com/bharat/zigbee2mqtt-control4/issues/3)
   for the full investigation.
 
+## Security
+
+### Securing your MQTT broker
+
+Zigbee2MQTT and this integration talk to each other only through your MQTT
+broker, and they trust what they read there. Anyone who can publish to the
+broker can send Zigbee2MQTT commands to your devices and can forge button
+presses, which run whatever actions you bound to those buttons. Treat
+publish access to `zigbee2mqtt/#` like access to the switches themselves.
+
+Give every client its own username and password, turn off anonymous
+access, and let only the Zigbee2MQTT user and the Home Assistant user
+publish under `zigbee2mqtt/#`. With Mosquitto, that looks like this:
+
+```
+# mosquitto.conf
+allow_anonymous false
+password_file /mosquitto/config/passwords
+acl_file /mosquitto/config/acl
+```
+
+```
+# /mosquitto/config/acl
+user zigbee2mqtt
+topic readwrite zigbee2mqtt/#
+topic readwrite homeassistant/#
+
+user homeassistant
+topic readwrite zigbee2mqtt/#
+topic readwrite homeassistant/#
+
+# Any other client that needs to watch device state gets read-only access.
+user dashboard
+topic read zigbee2mqtt/#
+```
+
+Use your own usernames, and change `zigbee2mqtt` if you set a different
+base topic. The `homeassistant/#` lines cover MQTT discovery. Once an ACL
+file is in place, a user with no entry in it has no access at all.
+
+The integration also limits what a forged message can do:
+
+- Retained button presses are ignored, so a press left on the broker does
+  not fire again when Home Assistant restarts or reconnects.
+- Button actions run with the caller's permissions. An action started
+  through the `control4_dimmers.press_button` service can only do what the
+  user who called it is allowed to do.
+- Commands are sent to each device by its Zigbee address (IEEE), not its
+  name, so a forged device list that swaps two names does not send
+  commands to the wrong device.
+
+These limits reduce the damage; they do not replace broker access
+control.
+
 ## Services
 
 The integration exposes the following service actions you can call
@@ -394,6 +511,16 @@ Every service identifies a device by either `entity_id` (any entity
 that belongs to the device, such as its sensor anchor or one of its
 button event entities) or `ieee_address` (the raw Zigbee address).
 Provide exactly one.
+
+Services that change a device's stored configuration or write to its
+firmware (`set_device_config`, `set_slot`, `set_device_type`,
+`set_led`, `set_slot_led`, `push_config`, `audit_config`,
+`send_raw_command`, `snapshot`, `restore`, `delete_snapshot`) are
+limited to administrators. `press_button` is open to every user, but
+it runs the button's action with that user's permissions: the user
+must be allowed to control the button's event entity, and an action
+that targets an entity they can't control or calls an admin-only
+service is refused. Physical presses are unaffected.
 
 ### `control4_dimmers.set_device_config`
 

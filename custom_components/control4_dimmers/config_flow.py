@@ -25,6 +25,29 @@ if TYPE_CHECKING:
     from homeassistant.config_entries import ConfigEntry
 
 
+def valid_base_topic(topic: object) -> bool:
+    """
+    Return whether a Zigbee2MQTT base topic is usable.
+
+    The integration subscribes to <topic>/+ and <topic>/bridge/devices and
+    slices device names off the front of incoming topics, so the topic
+    must be non-empty, free of MQTT wildcards and NUL, and must not start
+    or end with a slash.
+    """
+    if not isinstance(topic, str) or not topic.strip():
+        return False
+    if any(ch in topic for ch in "+#\0"):
+        return False
+    return not topic.startswith("/") and not topic.endswith("/")
+
+
+def _topic_errors(user_input: dict) -> dict[str, str]:
+    """Return form errors for an invalid MQTT base topic."""
+    if valid_base_topic(user_input.get(CONF_MQTT_TOPIC)):
+        return {}
+    return {CONF_MQTT_TOPIC: "invalid_topic"}
+
+
 class Control4DimmersFlowHandler(config_entries.ConfigFlow, domain=DOMAIN):
     """Config flow for Control4 Dimmers."""
 
@@ -43,7 +66,10 @@ class Control4DimmersFlowHandler(config_entries.ConfigFlow, domain=DOMAIN):
         user_input: dict | None = None,
     ) -> config_entries.ConfigFlowResult:
         """Handle a flow initialized by the user."""
+        errors: dict[str, str] = {}
         if user_input is not None:
+            errors = _topic_errors(user_input)
+        if user_input is not None and not errors:
             await self.async_set_unique_id(DOMAIN)
             self._abort_if_unique_id_configured()
             return self.async_create_entry(
@@ -65,6 +91,7 @@ class Control4DimmersFlowHandler(config_entries.ConfigFlow, domain=DOMAIN):
                     ),
                 },
             ),
+            errors=errors,
         )
 
 
@@ -81,7 +108,10 @@ class Control4DimmersOptionsFlow(config_entries.OptionsFlowWithReload):
         user_input: dict | None = None,
     ) -> config_entries.ConfigFlowResult:
         """Show and handle the single options form."""
+        errors: dict[str, str] = {}
         if user_input is not None:
+            errors = _topic_errors(user_input)
+        if user_input is not None and not errors:
             user_input[CONF_AUDIT_INTERVAL] = int(user_input[CONF_AUDIT_INTERVAL])
             return self.async_create_entry(title="", data=user_input)
 
@@ -128,4 +158,5 @@ class Control4DimmersOptionsFlow(config_entries.OptionsFlowWithReload):
                     ),
                 },
             ),
+            errors=errors,
         )

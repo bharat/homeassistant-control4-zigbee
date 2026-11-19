@@ -2,10 +2,34 @@
 
 from __future__ import annotations
 
+import json
+import math
+import re
 from dataclasses import dataclass, field
 from typing import Any
 
-from .const import DEVICE_TYPE_KEYPADDIM, DEVICE_TYPE_SWITCH, SWITCH_DIM_CODES
+from .const import (
+    DEVICE_TYPE_KEYPADDIM,
+    DEVICE_TYPE_SWITCH,
+    DEVICE_TYPES,
+    SWITCH_DIM_CODES,
+)
+
+# Inbound MQTT state is untrusted: any client that can publish to the
+# broker can write a device's state topic. These bounds keep a forged or
+# corrupt payload from poisoning entity state or growing memory.
+_HEX6_RE = re.compile(r"#?[0-9a-fA-F]{6}")
+# Keys kept in DeviceState.raw. Everything the integration reads from raw
+# matches one of these; other Zigbee2MQTT fields (linkquality, update,
+# ...) are kept only if they are short scalars.
+_RAW_KEY_RE = re.compile(r"[a-z0-9_]{1,48}")
+_RAW_MAX_KEYS = 200
+_RAW_MAX_STR = 256
+_RAW_MAX_NESTED_JSON = 1024
+_ACTION_MAX_LEN = 64
+# Keys whose value an entity reports as a number. A string, NaN or
+# Infinity here would make Home Assistant's sensor or number entity raise.
+_NUMERIC_KEY_RE = re.compile(r"ambient_light|c4_load_[a-z0-9_]+|c4_tv_[0-9a-f]{2}")
 
 
 @dataclass
@@ -150,9 +174,19 @@ class DeviceState:
     button_configs: dict[int, dict[str, str]] = field(default_factory=dict)
     raw: dict[str, Any] = field(default_factory=dict)
 
-    def update_from_mqtt(self, payload: dict[str, Any]) -> None:
-        """Update state from an MQTT state payload."""
-        self.raw.update(payload)
+    def update_from_mqtt(self, payload: dict[str, Any]) -> None:  # noqa: PLR0912
+        """
+        Update state from an MQTT state payload.
+
+        Values that do not have the shape the contract promises are
+        dropped instead of stored: state is ON/OFF, brightness an integer
+        0-255, colors six-digit hex, numeric readings finite numbers, and
+        c4_device_type one of the known types.
+        """
+        payload = sanitize_payload(payload)
+        for key, value in payload.items():
+            if key in self.raw or len(self.raw) < _RAW_MAX_KEYS:
+                self.raw[key] = value
 
         if "state" in payload:
             self.state = payload["state"]
@@ -160,7 +194,9 @@ class DeviceState:
             self.brightness = payload["brightness"]
         detect_result = payload.get("c4_detect_result")
         if isinstance(detect_result, dict) and "dim_code" in detect_result:
-            self.dim_code = detect_result["dim_code"]
+            dim_code = detect_result["dim_code"]
+            if dim_code is None or (isinstance(dim_code, str) and len(dim_code) <= 8):  # noqa: PLR2004
+                self.dim_code = dim_code
         if "c4_device_type" in payload:
             self.device_type = refine_device_type(
                 payload["c4_device_type"], self.dim_code
@@ -171,25 +207,17 @@ class DeviceState:
             led_on_key = f"c4_led_{btn}_on"
             led_off_key = f"c4_led_{btn}_off"
             if led_on_key in payload:
-                self.led_colors.setdefault(btn, {})["on"] = _extract_color(
-                    payload[led_on_key]
-                )
+                self.led_colors.setdefault(btn, {})["on"] = payload[led_on_key]
             if led_off_key in payload:
-                self.led_colors.setdefault(btn, {})["off"] = _extract_color(
-                    payload[led_off_key]
-                )
+                self.led_colors.setdefault(btn, {})["off"] = payload[led_off_key]
 
             # Legacy Z2M HS color format (for backwards compatibility)
             color_on_key = f"color_button_{btn}_on"
             color_off_key = f"color_button_{btn}_off"
             if color_on_key in payload:
-                self.led_colors.setdefault(btn, {})["on"] = _extract_color(
-                    payload[color_on_key]
-                )
+                self.led_colors.setdefault(btn, {})["on"] = payload[color_on_key]
             if color_off_key in payload:
-                self.led_colors.setdefault(btn, {})["off"] = _extract_color(
-                    payload[color_off_key]
-                )
+                self.led_colors.setdefault(btn, {})["off"] = payload[color_off_key]
 
             beh_key = f"button_{btn}_behavior"
             mode_key = f"button_{btn}_led_mode"
@@ -197,6 +225,83 @@ class DeviceState:
                 self.button_configs.setdefault(btn, {})["behavior"] = payload[beh_key]
             if mode_key in payload:
                 self.button_configs.setdefault(btn, {})["led_mode"] = payload[mode_key]
+
+
+def valid_hex(value: Any) -> str | None:
+    """Return a color as lowercase six-digit hex without "#", or None."""
+    if isinstance(value, str) and _HEX6_RE.fullmatch(value):
+        return value.lstrip("#").lower()
+    return None
+
+
+def _is_finite_number(value: Any) -> bool:
+    """Return whether value is an int or float (not a bool) and finite."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return False
+    return math.isfinite(value)
+
+
+def _clean_color(value: Any) -> str | None:
+    """Return a payload color as lowercase six-digit hex, or None if invalid."""
+    if isinstance(value, str):
+        return valid_hex(value)
+    if isinstance(value, dict):
+        hue = value.get("hue", 0)
+        sat = value.get("saturation", 0)
+        if not (_is_finite_number(hue) and _is_finite_number(sat)):
+            return None
+        return _hs_to_hex(hue % 360, min(max(sat, 0), 100))
+    return None
+
+
+def _clean_scalar(value: Any) -> tuple[bool, Any]:
+    """Validate a generic payload value; return (keep, value)."""
+    if value is None or isinstance(value, bool):
+        return True, value
+    if isinstance(value, (int, float)):
+        return _is_finite_number(value), value
+    if isinstance(value, str):
+        return len(value) <= _RAW_MAX_STR, value
+    if isinstance(value, (dict, list)):
+        try:
+            encoded = json.dumps(value, allow_nan=False)
+        except (TypeError, ValueError):
+            return False, None
+        return len(encoded) <= _RAW_MAX_NESTED_JSON, value
+    return False, None
+
+
+def _clean_value(key: str, value: Any) -> tuple[bool, Any]:  # noqa: PLR0911
+    """Validate one payload field against the shape its key promises."""
+    if key == "state":
+        if isinstance(value, str) and value.upper() in ("ON", "OFF"):
+            return True, value.upper()
+        return False, None
+    if key == "brightness":
+        ok = isinstance(value, int) and not isinstance(value, bool)
+        return (ok and 0 <= value <= 255), value  # noqa: PLR2004
+    if key == "action":
+        return isinstance(value, str) and len(value) <= _ACTION_MAX_LEN, value
+    if key == "c4_device_type":
+        return value in DEVICE_TYPES, value
+    if key.startswith(("c4_led_", "color_button_")):
+        color = _clean_color(value)
+        return color is not None, color
+    if _NUMERIC_KEY_RE.fullmatch(key):
+        return _is_finite_number(value), value
+    return _clean_scalar(value)
+
+
+def sanitize_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    """Return the fields of an inbound state payload that pass validation."""
+    clean: dict[str, Any] = {}
+    for key, value in payload.items():
+        if not isinstance(key, str) or not _RAW_KEY_RE.fullmatch(key):
+            continue
+        keep, cleaned = _clean_value(key, value)
+        if keep:
+            clean[key] = cleaned
+    return clean
 
 
 def refine_device_type(reported: str | None, dim_code: str | None) -> str | None:

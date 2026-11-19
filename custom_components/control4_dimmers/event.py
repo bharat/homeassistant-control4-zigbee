@@ -29,7 +29,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable
 
     from homeassistant.config_entries import ConfigEntry
-    from homeassistant.core import HomeAssistant
+    from homeassistant.core import Context, HomeAssistant
     from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
     from .manager import Control4Manager
@@ -47,7 +47,10 @@ async def async_setup_entry(
         return
 
     manager: Control4Manager = runtime["manager"]
-    known: set[str] = set()  # tracks "ieee_slot" keys already created
+    known: set[str] = set()  # unique_ids of entities already created
+    # ieee -> unique_ids its current type calls for, to spot a slot list
+    # change (issue #247) without scanning the registry on every update.
+    wanted_by_device: dict[str, frozenset[str]] = {}
 
     def _check_new_devices() -> None:
         new_entities: list[EventEntity] = []
@@ -56,9 +59,11 @@ async def async_setup_entry(
             device_type = config.effective_type if config else state.device_type
             if not device_type:
                 continue
+            wanted: set[str] = set()
             slot_ids = DEVICE_TYPE_SLOTS.get(device_type, [])
             for slot_id in slot_ids:
-                key = f"{ieee}_{slot_id}"
+                key = f"{ieee}_event_{slot_id}"
+                wanted.add(key)
                 if key in known:
                     continue
                 known.add(key)
@@ -75,7 +80,8 @@ async def async_setup_entry(
             # halves (issue #117). Pure keypads have no load, so no paddle.
             if device_type in LOAD_BEARING_TYPES:
                 for paddle_id in PADDLE_IDS:
-                    key = f"{ieee}_{paddle_id}"
+                    key = f"{ieee}_event_{paddle_id}"
+                    wanted.add(key)
                     if key in known:
                         continue
                     known.add(key)
@@ -88,12 +94,63 @@ async def async_setup_entry(
                             paddle_id=paddle_id,
                         )
                     )
+            # A type change (keypaddim -> dimmer, a relay recognized as a
+            # switch) shrinks the slot list; drop the entities the old
+            # type left behind so they do not linger as restored entities
+            # with nothing behind them (issue #247). Runs the first time a
+            # device's type is known, which also clears leftovers from a
+            # previous run. Only a type that does not rest on a live MQTT
+            # report alone (stored, user-set, or from the model) may remove
+            # entities; a forged c4_device_type must not delete them.
+            if (
+                wanted_by_device.get(ieee) != wanted
+                and manager.confirmed_type(ieee) == device_type
+            ):
+                wanted_by_device[ieee] = frozenset(wanted)
+                _remove_orphaned_slot_entities(
+                    hass, entry.entry_id, ieee, wanted, known
+                )
         if new_entities:
             async_add_entities(new_entities)
             LOGGER.debug("Added %d button event entities", len(new_entities))
 
     _check_new_devices()
     manager.add_listener(_check_new_devices)
+
+
+def _remove_orphaned_slot_entities(
+    hass: HomeAssistant,
+    entry_id: str,
+    ieee: str,
+    wanted: set[str],
+    known: set[str],
+) -> None:
+    """
+    Remove this integration's event entities for slots a device no longer has.
+
+    Only touches event entities registered to this config entry whose
+    unique_id belongs to the given device; everything else in the
+    registry is left alone. A removed entity is also forgotten from
+    `known`, so it is created again should the type change back.
+    """
+    ent_reg = er.async_get(hass)
+    prefix = f"{ieee}_event_"
+    for reg_entry in list(er.async_entries_for_config_entry(ent_reg, entry_id)):
+        unique_id = reg_entry.unique_id
+        if (
+            reg_entry.domain != "event"
+            or not unique_id.startswith(prefix)
+            or unique_id in wanted
+        ):
+            continue
+        LOGGER.info(
+            "Removing %s: device %s no longer has slot %s",
+            reg_entry.entity_id,
+            ieee,
+            unique_id[len(prefix) :],
+        )
+        ent_reg.async_remove(reg_entry.entity_id)
+        known.discard(unique_id)
 
 
 def _derive_behavior(
@@ -201,7 +258,10 @@ class Control4ButtonEvent(EventEntity):
             "led_mode": led_mode,
             "ieee_address": self._ieee,
             "slot_id": self._slot_id,
-            "tap_action": slot_cfg.tap_action if slot_cfg else None,
+            # The slot's stored actions are deliberately not exposed: state
+            # attributes are readable by every user and kept in history,
+            # and action data can hold secrets. Admins read actions through
+            # the websocket API instead.
             "led_track_entity_id": slot_cfg.led_track_entity_id if slot_cfg else None,
         }
         # Derive behavior for backward compat with existing automations
@@ -300,9 +360,11 @@ class Control4ButtonEvent(EventEntity):
         self._custom_name = new_name
         return self._custom_name != old_name
 
-    def _on_button_event(self, event_type: str) -> None:
+    def _on_button_event(self, event_type: str, context: Context | None) -> None:
         """Handle a button event dispatched by the manager."""
         self._trigger_event(event_type)
+        if context is not None:
+            self.async_set_context(context)
         self.async_write_ha_state()
 
 
@@ -356,7 +418,9 @@ class Control4PaddleEvent(EventEntity):
             self._unsub_event()
             self._unsub_event = None
 
-    def _on_paddle_event(self, event_type: str) -> None:
+    def _on_paddle_event(self, event_type: str, context: Context | None) -> None:
         """Handle a paddle event dispatched by the manager."""
         self._trigger_event(event_type)
+        if context is not None:
+            self.async_set_context(context)
         self.async_write_ha_state()

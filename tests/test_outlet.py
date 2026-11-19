@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import json
 from typing import Any
-from unittest.mock import MagicMock
+from unittest.mock import ANY, MagicMock
 
 import pytest
+from homeassistant.helpers import entity_registry as er
 
 from custom_components.control4_dimmers.const import DEVICE_TYPE_OUTLET, DOMAIN
 from custom_components.control4_dimmers.event import (
@@ -95,7 +96,10 @@ class TestOutletEntities:
         mock_entry: MagicMock,
     ) -> None:
         await manager._handle_bridge_devices(_bridge_msg([_outlet_bridge_device()]))
-        mock_hass.data = {DOMAIN: {mock_entry.entry_id: {"manager": manager}}}
+        mock_hass.data = {
+            DOMAIN: {mock_entry.entry_id: {"manager": manager}},
+            er.DATA_REGISTRY: MagicMock(),  # for the orphan sweep (issue #247)
+        }
         added: list = []
         await event_async_setup_entry(mock_hass, mock_entry, added.extend)
         assert {e.unique_id for e in added} == {f"{IEEE_OUTLET}_event_1"}
@@ -110,7 +114,12 @@ class TestOutletEntities:
         mock_entry: MagicMock,
     ) -> None:
         await manager._handle_bridge_devices(_bridge_msg([_outlet_bridge_device()]))
-        mock_hass.data = {DOMAIN: {mock_entry.entry_id: {"manager": manager}}}
+        registry = MagicMock()
+        registry.async_get_entity_id.return_value = None
+        mock_hass.data = {
+            DOMAIN: {mock_entry.entry_id: {"manager": manager}},
+            er.DATA_REGISTRY: registry,
+        }
         added: list = []
         await sensor_async_setup_entry(mock_hass, mock_entry, added.extend)
         assert any(isinstance(e, Control4DeviceSensor) for e in added)
@@ -124,4 +133,4 @@ class TestOutletEntities:
         manager._dispatch_button_action(
             manager.devices[IEEE_OUTLET], "button_1_click_1"
         )
-        cb.assert_called_once_with("single_tap")
+        cb.assert_called_once_with("single_tap", ANY)

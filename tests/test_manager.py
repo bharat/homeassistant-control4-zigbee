@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import json
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import ANY, AsyncMock, MagicMock, patch
 
 import pytest
+from homeassistant.exceptions import HomeAssistantError
 
 from custom_components.control4_dimmers.manager import (
     C4_MODEL_IDS,
@@ -170,7 +171,7 @@ class TestManagerEventCallbacks:
         cb = MagicMock()
         manager.register_event_callback(IEEE_DIMMER, 2, cb)
         manager._dispatch_button_action(dimmer_state, "button_2_press")
-        cb.assert_called_once_with("pressed")
+        cb.assert_called_once_with("pressed", ANY)
 
     def test_release_action_dispatch(
         self, manager: Control4Manager, dimmer_state: DeviceState
@@ -179,7 +180,7 @@ class TestManagerEventCallbacks:
         cb = MagicMock()
         manager.register_event_callback(IEEE_DIMMER, 2, cb)
         manager._dispatch_button_action(dimmer_state, "button_2_release")
-        cb.assert_called_once_with("released")
+        cb.assert_called_once_with("released", ANY)
 
     def test_click_action_dispatch(
         self, manager: Control4Manager, dimmer_state: DeviceState
@@ -188,7 +189,7 @@ class TestManagerEventCallbacks:
         cb = MagicMock()
         manager.register_event_callback(IEEE_DIMMER, 2, cb)
         manager._dispatch_button_action(dimmer_state, "button_2_click_2")
-        cb.assert_called_once_with("double_tap")
+        cb.assert_called_once_with("double_tap", ANY)
 
     def test_dimmer_bottom_button_maps_to_bottom_slot(
         self, manager: Control4Manager, dimmer_state: DeviceState
@@ -235,7 +236,7 @@ class TestManagerEventCallbacks:
         cb = MagicMock()
         manager.register_event_callback(IEEE_DIMMER, slot_id, cb)
         manager._dispatch_button_action(dimmer_state, f"button_{button}_press")
-        cb.assert_called_once_with("pressed")
+        cb.assert_called_once_with("pressed", ANY)
 
     @pytest.mark.parametrize("button", [7, 8, 9])
     def test_out_of_range_buttons_not_remapped(
@@ -264,7 +265,7 @@ class TestManagerEventCallbacks:
         cb = MagicMock()
         manager.register_event_callback(IEEE_DIMMER, 6, cb)
         manager._dispatch_button_action(dimmer_state, "button_6_press")
-        cb.assert_called_once_with("pressed")
+        cb.assert_called_once_with("pressed", ANY)
 
     def test_keypad_button_6_not_remapped(
         self, manager: Control4Manager, keypad_state: DeviceState
@@ -273,7 +274,7 @@ class TestManagerEventCallbacks:
         cb = MagicMock()
         manager.register_event_callback(keypad_state.ieee_address, 6, cb)
         manager._dispatch_button_action(keypad_state, "button_6_release")
-        cb.assert_called_once_with("released")
+        cb.assert_called_once_with("released", ANY)
 
     def test_unsubscribe_event_callback(
         self, manager: Control4Manager, dimmer_state: DeviceState
@@ -300,7 +301,7 @@ class TestManagerEventCallbacks:
         cb = MagicMock()
         manager.register_event_callback(IEEE_DIMMER, "paddle_up", cb)
         manager._dispatch_button_action(dimmer_state, "paddle_up_press")
-        cb.assert_called_once_with("pressed")
+        cb.assert_called_once_with("pressed", ANY)
 
     def test_paddle_down_scene_dispatch(
         self, manager: Control4Manager, dimmer_state: DeviceState
@@ -309,7 +310,7 @@ class TestManagerEventCallbacks:
         cb = MagicMock()
         manager.register_event_callback(IEEE_DIMMER, "paddle_down", cb)
         manager._dispatch_button_action(dimmer_state, "paddle_down_scene")
-        cb.assert_called_once_with("pressed")
+        cb.assert_called_once_with("pressed", ANY)
 
     def test_paddle_click_dispatch(
         self, manager: Control4Manager, dimmer_state: DeviceState
@@ -318,7 +319,7 @@ class TestManagerEventCallbacks:
         cb = MagicMock()
         manager.register_event_callback(IEEE_DIMMER, "paddle_up", cb)
         manager._dispatch_button_action(dimmer_state, "paddle_up_click_2")
-        cb.assert_called_once_with("double_tap")
+        cb.assert_called_once_with("double_tap", ANY)
 
     def test_button_click_4_clamps_to_triple_tap(
         self, manager: Control4Manager, dimmer_state: DeviceState
@@ -328,7 +329,7 @@ class TestManagerEventCallbacks:
         cb = MagicMock()
         manager.register_event_callback(IEEE_DIMMER, 2, cb)
         manager._dispatch_button_action(dimmer_state, "button_2_click_4")
-        cb.assert_called_once_with("triple_tap")
+        cb.assert_called_once_with("triple_tap", ANY)
 
     def test_paddle_click_4_clamps_to_triple_tap(
         self, manager: Control4Manager, dimmer_state: DeviceState
@@ -338,7 +339,7 @@ class TestManagerEventCallbacks:
         cb = MagicMock()
         manager.register_event_callback(IEEE_DIMMER, "paddle_down", cb)
         manager._dispatch_button_action(dimmer_state, "paddle_down_click_4")
-        cb.assert_called_once_with("triple_tap")
+        cb.assert_called_once_with("triple_tap", ANY)
 
     def test_fire_button_event_drops_undeclared_type(
         self, manager: Control4Manager, dimmer_state: DeviceState
@@ -380,7 +381,7 @@ class TestManagerEventCallbacks:
         manager.register_event_callback(IEEE_DIMMER, 2, cb)
         manager._dispatch_button_action(dimmer_state, "button_2_scene")
         manager._dispatch_button_action(dimmer_state, "button_2_press")
-        cb.assert_called_once_with("pressed")
+        cb.assert_called_once_with("pressed", ANY)
 
     def test_double_tap_fires_pressed_per_tap(
         self, manager: Control4Manager, dimmer_state: DeviceState
@@ -417,7 +418,7 @@ class TestManagerEventCallbacks:
         manager.register_event_callback(IEEE_DIMMER, 2, cb)
         with patch(
             "custom_components.control4_dimmers.manager.time.monotonic",
-            side_effect=[100.0, 100.0 + PRESS_PAIR_WINDOW + 0.1],
+            side_effect=[100.0, 100.0, 100.0 + PRESS_PAIR_WINDOW + 0.1],
         ):
             manager._dispatch_button_action(dimmer_state, "button_2_press")
             manager._dispatch_button_action(dimmer_state, "button_2_scene")
@@ -434,8 +435,8 @@ class TestManagerEventCallbacks:
         manager.register_event_callback(IEEE_DIMMER, 5, cb5)
         manager._dispatch_button_action(dimmer_state, "button_2_press")
         manager._dispatch_button_action(dimmer_state, "button_6_scene")
-        cb2.assert_called_once_with("pressed")
-        cb5.assert_called_once_with("pressed")
+        cb2.assert_called_once_with("pressed", ANY)
+        cb5.assert_called_once_with("pressed", ANY)
 
     def test_remapped_press_scene_pair_fires_pressed_once(
         self, manager: Control4Manager, dimmer_state: DeviceState
@@ -446,7 +447,7 @@ class TestManagerEventCallbacks:
         manager.register_event_callback(IEEE_DIMMER, 5, cb)
         manager._dispatch_button_action(dimmer_state, "button_6_press")
         manager._dispatch_button_action(dimmer_state, "button_6_scene")
-        cb.assert_called_once_with("pressed")
+        cb.assert_called_once_with("pressed", ANY)
 
     def test_paddle_press_scene_pair_fires_pressed_once(
         self, manager: Control4Manager, dimmer_state: DeviceState
@@ -457,7 +458,7 @@ class TestManagerEventCallbacks:
         manager.register_event_callback(IEEE_DIMMER, "paddle_up", cb)
         manager._dispatch_button_action(dimmer_state, "paddle_up_press")
         manager._dispatch_button_action(dimmer_state, "paddle_up_scene")
-        cb.assert_called_once_with("pressed")
+        cb.assert_called_once_with("pressed", ANY)
 
 
 # ── Manager: bridge device handling ──────────────────────────────────
@@ -503,7 +504,23 @@ class TestManagerBridgeDevices:
 
         msg2 = _make_mqtt_msg("zigbee2mqtt/bridge/devices", [])
         await manager._handle_bridge_devices(msg2)
+        # One list without the device is not enough: a forged or truncated
+        # list must not wipe every device at once.
+        assert IEEE_DIMMER in manager.devices
+        await manager._handle_bridge_devices(msg2)
         assert IEEE_DIMMER not in manager.devices
+
+    @pytest.mark.asyncio
+    async def test_reappearing_device_resets_missing_count(
+        self, manager: Control4Manager
+    ) -> None:
+        present = _make_mqtt_msg("zigbee2mqtt/bridge/devices", [make_bridge_device()])
+        empty = _make_mqtt_msg("zigbee2mqtt/bridge/devices", [])
+        await manager._handle_bridge_devices(present)
+        await manager._handle_bridge_devices(empty)
+        await manager._handle_bridge_devices(present)
+        await manager._handle_bridge_devices(empty)
+        assert IEEE_DIMMER in manager.devices
 
     @pytest.mark.asyncio
     async def test_updates_friendly_name(self, manager: Control4Manager) -> None:
@@ -601,7 +618,7 @@ class TestManagerDeviceState:
             {"action": "button_2_press"},
         )
         await manager._handle_device_state(msg)
-        cb.assert_called_once_with("pressed")
+        cb.assert_called_once_with("pressed", ANY)
 
     @pytest.mark.asyncio
     async def test_detect_result_refines_relay_to_switch(
@@ -1011,7 +1028,7 @@ class TestExecuteSlotAction:
         manager._hass.services.async_call = AsyncMock()
         await manager.execute_slot_action(IEEE_DIMMER, 2, "tap")
         manager._hass.services.async_call.assert_awaited_once_with(
-            "light", "toggle", {"entity_id": "light.kitchen"}
+            "light", "toggle", {"entity_id": "light.kitchen"}, context=None
         )
 
     @pytest.mark.asyncio
@@ -1037,7 +1054,7 @@ class TestExecuteSlotAction:
         manager._hass.services.async_call = AsyncMock()
         await manager.execute_slot_action(IEEE_DIMMER, 2, "tap")
         manager._hass.services.async_call.assert_awaited_once_with(
-            "light", "turn_on", {"entity_id": "light.kitchen"}
+            "light", "turn_on", {"entity_id": "light.kitchen"}, context=None
         )
 
     @pytest.mark.asyncio
@@ -1067,7 +1084,7 @@ class TestExecuteSlotAction:
         manager._hass.services.async_call = AsyncMock()
         await manager.execute_slot_action(IEEE_DIMMER, 2, "tap")
         manager._hass.services.async_call.assert_awaited_once_with(
-            "light", "toggle", {"entity_id": "light.kitchen"}
+            "light", "toggle", {"entity_id": "light.kitchen"}, context=None
         )
 
     @pytest.mark.asyncio
@@ -1094,7 +1111,7 @@ class TestExecuteSlotAction:
         manager._hass.services.async_call = AsyncMock()
         await manager.execute_slot_action(IEEE_DIMMER, 2, "double_tap")
         manager._hass.services.async_call.assert_awaited_once_with(
-            "light", "toggle", {"entity_id": "light.bedroom"}
+            "light", "toggle", {"entity_id": "light.bedroom"}, context=None
         )
 
     @pytest.mark.asyncio
@@ -1119,7 +1136,7 @@ class TestExecuteSlotAction:
         manager._hass.services.async_call = AsyncMock()
         await manager.execute_slot_action(IEEE_DIMMER, 2, "double_tap")
         manager._hass.services.async_call.assert_awaited_once_with(
-            "script", "activity_home", {}
+            "script", "activity_home", {}, context=None
         )
 
     @pytest.mark.asyncio
@@ -1186,27 +1203,99 @@ class TestDispatchWithActions:
         # Should NOT create a task — firmware handles load control
         manager._hass.async_create_task.assert_not_called()
 
-    def test_scene_event_triggers_load_control(
+    @pytest.mark.parametrize("behavior", ["toggle_load", "load_on", "load_off"])
+    @pytest.mark.parametrize("frame", ["press", "scene"])
+    def test_physical_tap_on_load_control_never_acts_in_software(
+        self,
+        manager: Control4Manager,
+        dimmer_state: DeviceState,
+        behavior: str,
+        frame: str,
+    ) -> None:
+        """
+        A press or scene frame on a load-control slot only fires "pressed".
+
+        The firmware switches the load itself (issue #242): acting here too
+        toggled the light a second time about a second later, and a toggle
+        landing mid-ramp left the remembered level near zero. No task, no
+        light service call and no state publish may result from the frame.
+        """
+        manager._devices[IEEE_DIMMER] = dimmer_state
+        config = DeviceConfig(
+            ieee_address=IEEE_DIMMER,
+            friendly_name="Kitchen",
+            device_type="dimmer",
+            slots=[SlotConfig(slot_id=2, behavior=behavior, led_mode="follow_load")],
+        )
+        manager._store._devices[IEEE_DIMMER] = config
+        light_state = MagicMock()
+        light_state.entity_id = "light.kitchen"
+        light_state.attributes = {"friendly_name": "Kitchen"}
+        manager._hass.states.async_all.return_value = [light_state]
+        manager._hass.services.async_call = AsyncMock()
+        cb = MagicMock()
+        manager.register_event_callback(IEEE_DIMMER, 2, cb)
+        with patch.object(
+            manager, "async_send_mqtt", new_callable=AsyncMock
+        ) as mock_mqtt:
+            manager._dispatch_button_action(dimmer_state, f"button_2_{frame}")
+        assert [c.args[0] for c in cb.call_args_list] == ["pressed"]
+        manager._hass.async_create_task.assert_not_called()
+        manager._hass.services.async_call.assert_not_called()
+        mock_mqtt.assert_not_called()
+
+    @pytest.mark.parametrize("behavior", ["toggle_load", "load_on", "load_off"])
+    def test_full_tap_sequence_on_load_control_fires_pressed_once(
+        self,
+        manager: Control4Manager,
+        dimmer_state: DeviceState,
+        behavior: str,
+    ) -> None:
+        """
+        One tap (bp, sc, cc 01) on a load slot: one "pressed", no action.
+
+        On a dimmer, button 2 reports on the top half, which is slot 2.
+        """
+        manager._devices[IEEE_DIMMER] = dimmer_state
+        config = DeviceConfig(
+            ieee_address=IEEE_DIMMER,
+            friendly_name="Kitchen",
+            device_type="dimmer",
+            slots=[SlotConfig(slot_id=2, behavior=behavior, led_mode="follow_load")],
+        )
+        manager._store._devices[IEEE_DIMMER] = config
+        cb = MagicMock()
+        manager.register_event_callback(IEEE_DIMMER, 2, cb)
+        for action in ("button_2_press", "button_2_scene", "button_2_click_1"):
+            manager._dispatch_button_action(dimmer_state, action)
+        assert [c.args[0] for c in cb.call_args_list] == ["pressed", "single_tap"]
+        manager._hass.async_create_task.assert_not_called()
+
+    def test_scene_on_programmable_does_not_repeat_tap_action(
         self, manager: Control4Manager, dimmer_state: DeviceState
     ) -> None:
-        """Scene event (c4.dmx.sc) on load-control button triggers software."""
-        for behavior in ("toggle_load", "load_on", "load_off"):
-            manager._hass.reset_mock()
-            manager._devices[IEEE_DIMMER] = dimmer_state
-            config = DeviceConfig(
-                ieee_address=IEEE_DIMMER,
-                friendly_name="Kitchen",
-                device_type="dimmer",
-                slots=[
-                    SlotConfig(slot_id=2, behavior=behavior, led_mode="follow_load")
-                ],
-            )
-            manager._store._devices[IEEE_DIMMER] = config
-            manager._dispatch_button_action(dimmer_state, "button_2_scene")
-            (
-                manager._hass.async_create_task.assert_called(),
-                (f"Scene on {behavior} should dispatch"),
-            )
+        """A programmable slot acts on the press frame only, not the scene."""
+        manager._devices[IEEE_DIMMER] = dimmer_state
+        config = DeviceConfig(
+            ieee_address=IEEE_DIMMER,
+            friendly_name="Kitchen",
+            device_type="dimmer",
+            slots=[
+                SlotConfig(
+                    slot_id=2,
+                    behavior="keypad",
+                    led_mode="fixed",
+                    tap_action={
+                        "action": "light.toggle",
+                        "target": {"entity_id": "light.kitchen"},
+                    },
+                )
+            ],
+        )
+        manager._store._devices[IEEE_DIMMER] = config
+        manager._dispatch_button_action(dimmer_state, "button_2_press")
+        manager._dispatch_button_action(dimmer_state, "button_2_scene")
+        assert manager._hass.async_create_task.call_count == 1
 
     def test_press_defers_when_double_tap_configured(
         self, manager: Control4Manager, dimmer_state: DeviceState
@@ -1334,7 +1423,7 @@ class TestLoadControlBehavior:
         manager._hass.services.async_call = AsyncMock()
         await manager.press_button(IEEE_DIMMER, 2)
         manager._hass.services.async_call.assert_awaited_once_with(
-            "light", "turn_on", {"entity_id": "light.kitchen"}
+            "light", "turn_on", {"entity_id": "light.kitchen"}, context=None
         )
 
     @pytest.mark.asyncio
@@ -1359,7 +1448,44 @@ class TestLoadControlBehavior:
         manager._hass.services.async_call = AsyncMock()
         await manager.press_button(IEEE_DIMMER, 2)
         manager._hass.services.async_call.assert_awaited_once_with(
-            "light", "toggle", {"entity_id": "light.kitchen"}
+            "light", "toggle", {"entity_id": "light.kitchen"}, context=None
+        )
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("behavior", "svc"),
+        [("toggle_load", "toggle"), ("load_on", "turn_on"), ("load_off", "turn_off")],
+    )
+    async def test_press_button_service_on_load_slot_still_acts(
+        self,
+        manager: Control4Manager,
+        dimmer_state: DeviceState,
+        behavior: str,
+        svc: str,
+    ) -> None:
+        """
+        An explicit press_button call on a load slot drives the light.
+
+        Physical taps leave the load to the firmware (issue #242), but the
+        press_button service and the card are deliberate software presses
+        with no firmware action behind them, so they must still act.
+        """
+        manager._devices[IEEE_DIMMER] = dimmer_state
+        config = DeviceConfig(
+            ieee_address=IEEE_DIMMER,
+            friendly_name="Kitchen",
+            device_type="dimmer",
+            slots=[SlotConfig(slot_id=1, behavior=behavior, led_mode="follow_load")],
+        )
+        manager._store._devices[IEEE_DIMMER] = config
+        light_state = MagicMock()
+        light_state.entity_id = "light.kitchen"
+        light_state.attributes = {"friendly_name": "Kitchen"}
+        manager._hass.states.async_all.return_value = [light_state]
+        manager._hass.services.async_call = AsyncMock()
+        await manager.press_button(IEEE_DIMMER, 1)
+        manager._hass.services.async_call.assert_awaited_once_with(
+            "light", svc, {"entity_id": "light.kitchen"}, context=None
         )
 
     @pytest.mark.asyncio
@@ -1462,7 +1588,7 @@ class TestLoadControlBehavior:
         manager._hass.services.async_call = AsyncMock()
         await manager.press_button(IEEE_DIMMER, 2)
         manager._hass.services.async_call.assert_awaited_once_with(
-            "light", "toggle", {"entity_id": "light.bedroom"}
+            "light", "toggle", {"entity_id": "light.bedroom"}, context=None
         )
 
     @pytest.mark.asyncio
@@ -1855,3 +1981,301 @@ class TestGetDeviceInfo:
         assert info["device_type"] == "dimmer"
         assert info["config"]["slots"][0]["behavior"] == "load_on"
         assert info["config"]["slots"][0]["led_mode"] == "follow_load"
+
+
+# ── MQTT disconnect handling (issue #246) ────────────────────────────
+
+
+def _tracked_dimmer_config() -> DeviceConfig:
+    """Build a dimmer config whose slot 2 LED mirrors light.kitchen."""
+    return DeviceConfig(
+        ieee_address=IEEE_DIMMER,
+        friendly_name="Kitchen",
+        device_type="dimmer",
+        slots=[
+            SlotConfig(
+                slot_id=2,
+                behavior="keypad",
+                led_mode="fixed",
+                led_on_color="ffffff",
+                led_off_color="000000",
+                tap_action={
+                    "action": "light.toggle",
+                    "target": {"entity_id": "light.kitchen"},
+                },
+                led_track_entity_id="light.kitchen",
+            )
+        ],
+    )
+
+
+def _light_state(state: str) -> MagicMock:
+    light = MagicMock()
+    light.entity_id = "light.kitchen"
+    light.state = state
+    return light
+
+
+class TestMqttDisconnect:
+    """Publish failures are logged, and a reconnect re-syncs tracked LEDs."""
+
+    @pytest.fixture
+    def tracked_manager(
+        self, manager: Control4Manager, dimmer_state: DeviceState
+    ) -> Control4Manager:
+        manager._devices[IEEE_DIMMER] = dimmer_state
+        manager._store._devices[IEEE_DIMMER] = _tracked_dimmer_config()
+        manager.setup_light_tracking()
+        return manager
+
+    @staticmethod
+    def _state_listener(manager: Control4Manager) -> Any:
+        """Return the EVENT_STATE_CHANGED listener setup_light_tracking installed."""
+        return manager._hass.bus.async_listen.call_args[0][1]
+
+    @pytest.mark.asyncio
+    async def test_tracking_send_failure_logs_warning(
+        self,
+        tracked_manager: Control4Manager,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """A publish error during LED tracking is logged, not raised."""
+        listener = self._state_listener(tracked_manager)
+        event = MagicMock()
+        event.data = {"entity_id": "light.kitchen", "new_state": _light_state("on")}
+        with patch.object(
+            tracked_manager,
+            "async_send_mqtt",
+            new_callable=AsyncMock,
+            side_effect=HomeAssistantError("client is not currently connected"),
+        ):
+            await listener(event)  # must not raise
+        assert "LED tracking update for slot 2 for Kitchen not sent" in caplog.text
+        assert "client is not currently connected" in caplog.text
+        assert "Traceback" not in caplog.text
+
+    @pytest.mark.asyncio
+    async def test_tracking_sends_mode_05_when_connected(
+        self, tracked_manager: Control4Manager
+    ) -> None:
+        listener = self._state_listener(tracked_manager)
+        event = MagicMock()
+        event.data = {"entity_id": "light.kitchen", "new_state": _light_state("off")}
+        with patch.object(
+            tracked_manager, "async_send_mqtt", new_callable=AsyncMock
+        ) as mock_send:
+            await listener(event)
+        # The override first, then the load-on/load-off colors that keep
+        # the dimmer's own load from repainting it.
+        assert [c.args for c in mock_send.await_args_list] == [
+            (IEEE_DIMMER, {"c4_cmd": "c4.dmx.led 01 05 000000"}),
+            (IEEE_DIMMER, {"c4_cmd": "c4.dmx.led 01 03 000000"}),
+            (IEEE_DIMMER, {"c4_cmd": "c4.dmx.led 01 04 000000"}),
+        ]
+
+    @pytest.mark.asyncio
+    async def test_reconnect_resends_tracked_leds(
+        self, tracked_manager: Control4Manager
+    ) -> None:
+        """Disconnect then reconnect re-sends the LED from the light's state."""
+        tracked_manager._hass.states.get.return_value = _light_state("on")
+        tracked_manager._on_mqtt_connection_change(connected=False)
+        tracked_manager._hass.async_create_task.assert_not_called()
+
+        tracked_manager._on_mqtt_connection_change(connected=True)
+        tracked_manager._hass.async_create_task.assert_called_once()
+        resync = tracked_manager._hass.async_create_task.call_args[0][0]
+        with patch.object(
+            tracked_manager, "async_send_mqtt", new_callable=AsyncMock
+        ) as mock_send:
+            sent = await resync
+        assert sent == 1
+        assert [c.args for c in mock_send.await_args_list] == [
+            (IEEE_DIMMER, {"c4_cmd": "c4.dmx.led 01 05 ffffff"}),
+            (IEEE_DIMMER, {"c4_cmd": "c4.dmx.led 01 03 ffffff"}),
+            (IEEE_DIMMER, {"c4_cmd": "c4.dmx.led 01 04 ffffff"}),
+        ]
+        tracked_manager._hass.states.get.assert_called_with("light.kitchen")
+
+    def test_repeated_connected_reports_resync_once(
+        self, tracked_manager: Control4Manager
+    ) -> None:
+        """Only a not-connected -> connected edge schedules a resync."""
+        tracked_manager._on_mqtt_connection_change(connected=True)
+        tracked_manager._on_mqtt_connection_change(connected=True)
+        assert tracked_manager._hass.async_create_task.call_count == 1
+        # The scheduled coroutine is never run by the mock; close it.
+        tracked_manager._hass.async_create_task.call_args[0][0].close()
+
+    @pytest.mark.asyncio
+    async def test_resync_skips_unknown_light_state(
+        self, tracked_manager: Control4Manager
+    ) -> None:
+        tracked_manager._hass.states.get.return_value = None
+        with patch.object(
+            tracked_manager, "async_send_mqtt", new_callable=AsyncMock
+        ) as mock_send:
+            assert await tracked_manager.async_resync_tracked_leds() == 0
+        mock_send.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_resync_survives_publish_failure(
+        self,
+        tracked_manager: Control4Manager,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        tracked_manager._hass.states.get.return_value = _light_state("on")
+        with patch.object(
+            tracked_manager,
+            "async_send_mqtt",
+            new_callable=AsyncMock,
+            side_effect=HomeAssistantError("client is not currently connected"),
+        ):
+            assert await tracked_manager.async_resync_tracked_leds() == 0
+        assert "not sent, MQTT publish failed" in caplog.text
+
+    @pytest.mark.asyncio
+    async def test_async_start_subscribes_to_connection_status(
+        self, manager: Control4Manager
+    ) -> None:
+        unsub = MagicMock()
+        with (
+            patch(
+                "custom_components.control4_dimmers.manager.mqtt.async_subscribe",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                "custom_components.control4_dimmers.manager."
+                "mqtt.async_subscribe_connection_status",
+                return_value=unsub,
+            ) as mock_status,
+            patch.object(manager, "start_audit_sweep"),
+        ):
+            await manager.async_start()
+            mock_status.assert_called_once_with(
+                manager._hass, manager._on_mqtt_connection_change
+            )
+            assert unsub in manager._subscriptions
+            await manager.async_stop()
+        unsub.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_read_slot_publish_failure_returns_none(
+        self,
+        manager: Control4Manager,
+        dimmer_state: DeviceState,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """The audit/verify read treats a failed publish like a timeout."""
+        manager._devices[IEEE_DIMMER] = dimmer_state
+        with patch.object(
+            manager,
+            "async_send_mqtt",
+            new_callable=AsyncMock,
+            side_effect=HomeAssistantError("client is not currently connected"),
+        ):
+            assert await manager._read_slot(dimmer_state, 2) is None
+        assert "Verify read of slot 2 for Kitchen not sent" in caplog.text
+        assert manager._pending_verifies == {}
+
+    @pytest.mark.asyncio
+    async def test_audit_counts_unpublished_read_as_unread(
+        self,
+        manager: Control4Manager,
+        dimmer_state: DeviceState,
+        dimmer_config: DeviceConfig,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        manager._devices[IEEE_DIMMER] = dimmer_state
+        manager._store._devices[IEEE_DIMMER] = dimmer_config
+        with patch.object(
+            manager,
+            "async_send_mqtt",
+            new_callable=AsyncMock,
+            side_effect=HomeAssistantError("client is not currently connected"),
+        ):
+            summary = await manager.async_audit_device(IEEE_DIMMER)
+        assert summary is not None
+        assert summary["slots_unread"] == len(dimmer_config.slots)
+        assert summary["slots_checked"] == 0
+        assert "Traceback" not in caplog.text
+
+    @pytest.mark.asyncio
+    async def test_delayed_detect_failure_allows_retry(
+        self, manager: Control4Manager, dimmer_state: DeviceState
+    ) -> None:
+        manager._devices[IEEE_DIMMER] = dimmer_state
+        manager._detect_sent.add(IEEE_DIMMER)
+        with (
+            patch(
+                "custom_components.control4_dimmers.manager.asyncio.sleep",
+                new_callable=AsyncMock,
+            ),
+            patch.object(
+                manager,
+                "async_send_mqtt",
+                new_callable=AsyncMock,
+                side_effect=HomeAssistantError("client is not currently connected"),
+            ),
+        ):
+            await manager._async_delayed_detect(IEEE_DIMMER)
+        assert IEEE_DIMMER not in manager._detect_sent
+
+    @pytest.mark.asyncio
+    async def test_button_action_task_logs_publish_failure(
+        self,
+        manager: Control4Manager,
+        dimmer_state: DeviceState,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        manager._devices[IEEE_DIMMER] = dimmer_state
+        with patch.object(
+            manager,
+            "press_button",
+            new_callable=AsyncMock,
+            side_effect=HomeAssistantError("client is not currently connected"),
+        ):
+            await manager._press_button_task(IEEE_DIMMER, 2, "pressed")
+        assert "Button action for Kitchen slot 2 (pressed) failed" in caplog.text
+
+    @pytest.mark.asyncio
+    async def test_button_action_task_logs_unexpected_error(
+        self,
+        manager: Control4Manager,
+        dimmer_state: DeviceState,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        manager._devices[IEEE_DIMMER] = dimmer_state
+        with patch.object(
+            manager, "press_button", new_callable=AsyncMock, side_effect=TypeError("x")
+        ):
+            await manager._press_button_task(IEEE_DIMMER, 2, "pressed")
+        assert "Button action for Kitchen slot 2 (pressed) errored" in caplog.text
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "action",
+        [
+            "__self_load__",
+            {"action": 5},
+            {"action": "light.toggle", "target": "light.x"},
+            {"action": "light.toggle", "data": ["x"]},
+        ],
+    )
+    async def test_malformed_stored_action_is_skipped(
+        self,
+        manager: Control4Manager,
+        dimmer_state: DeviceState,
+        action: Any,
+    ) -> None:
+        """Stored data that skipped validation logs instead of raising."""
+        manager._devices[IEEE_DIMMER] = dimmer_state
+        manager._store._devices[IEEE_DIMMER] = DeviceConfig(
+            ieee_address=IEEE_DIMMER,
+            friendly_name="Kitchen",
+            device_type="dimmer",
+            slots=[SlotConfig(slot_id=2, tap_action=action)],
+        )
+        manager._hass.services.async_call = AsyncMock()
+        await manager.execute_slot_action(IEEE_DIMMER, 2, "tap")
+        manager._hass.services.async_call.assert_not_called()

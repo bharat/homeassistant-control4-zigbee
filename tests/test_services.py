@@ -29,6 +29,8 @@ from custom_components.control4_dimmers.models import (
 )
 from custom_components.control4_dimmers.store import Control4Store
 
+from .conftest import fake_entity_registry
+
 IEEE = "0x000fff0000ccc001"
 
 
@@ -58,6 +60,9 @@ def _make_runtime(
     mgr._push_slot_config = AsyncMock()
     mock_hass.data = {DOMAIN: {"entry1": {"manager": mgr, "store": store}}}
     mock_hass.states.async_all.return_value = []
+    ent_reg = fake_entity_registry(mock_hass)
+    ent_reg.add("sensor.theater", f"{IEEE}_sensor")
+    ent_reg.add("event.theater_button_1", f"{IEEE}_event_1")
     return mgr, store
 
 
@@ -187,7 +192,7 @@ class TestSetDeviceType:
     ) -> None:
         mgr, store = _make_runtime(mock_hass, config=None)
         mock_hass.states.get.return_value = _entity_state(IEEE)
-        call = _call({"entity_id": "light.theater", "device_type": "dimmer"})
+        call = _call({"entity_id": "sensor.theater", "device_type": "dimmer"})
         await _svc_set_device_type(mock_hass, call)
         config = store.get_device(IEEE)
         assert config is not None
@@ -264,7 +269,9 @@ class TestDeviceTypeSchemas:
     def _schema(mock_hass: MagicMock, service: str) -> vol.Schema:
         for call in mock_hass.services.async_register.call_args_list:
             if call.args[1] == service:
-                return call.kwargs["schema"]
+                # async_register_admin_service passes the schema
+                # positionally; plain registrations pass it by keyword.
+                return call.args[3] if len(call.args) > 3 else call.kwargs["schema"]
         msg = f"service {service} not registered"
         raise AssertionError(msg)
 
@@ -285,6 +292,89 @@ class TestDeviceTypeSchemas:
         assert data["device_type_override"] == "switch"
         with pytest.raises(vol.Invalid):
             schema({"ieee_address": IEEE, "device_type_override": "relay"})
+
+
+# ── LED color validation ─────────────────────────────────────────────
+
+# Values that would smuggle extra bytes or a second command into the
+# c4_cmd string that set_led / set_slot_led compose.
+BAD_COLORS = [
+    "ff0000 05 000000",
+    "ff0000\nc4.dmx.led 00 05 000000",
+    "c4.dmx.led 00 05 ff0000",
+    "c4.",
+    "ff00",
+    "ff00000",
+    "gg0000",
+    "",
+    123,
+]
+
+
+class TestLedColorSchemas:
+    """set_led and set_slot_led only accept six-digit hex colors."""
+
+    @staticmethod
+    def _schema(mock_hass: MagicMock, service: str) -> vol.Schema:
+        return TestDeviceTypeSchemas._schema(mock_hass, service)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("color", BAD_COLORS)
+    async def test_set_led_rejects_non_hex(
+        self, mock_hass: MagicMock, color: Any
+    ) -> None:
+        await _register_services(mock_hass)
+        schema = self._schema(mock_hass, "set_led")
+        with pytest.raises(vol.Invalid):
+            schema({"entity_id": "event.k_1", "mode": "on", "color": color})
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("field", ["on_color", "off_color"])
+    @pytest.mark.parametrize("color", BAD_COLORS)
+    async def test_set_slot_led_rejects_non_hex(
+        self, mock_hass: MagicMock, field: str, color: Any
+    ) -> None:
+        await _register_services(mock_hass)
+        schema = self._schema(mock_hass, "set_slot_led")
+        with pytest.raises(vol.Invalid):
+            schema({"entity_id": "event.k_1", field: color})
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("field", ["led_on_color", "led_off_color"])
+    @pytest.mark.parametrize("color", BAD_COLORS)
+    async def test_set_slot_rejects_non_hex(
+        self, mock_hass: MagicMock, field: str, color: Any
+    ) -> None:
+        await _register_services(mock_hass)
+        schema = self._schema(mock_hass, "set_slot")
+        with pytest.raises(vol.Invalid):
+            schema({"ieee_address": IEEE, "slot_id": 1, field: color})
+
+    @pytest.mark.asyncio
+    async def test_set_led_accepts_and_normalizes_hex(
+        self, mock_hass: MagicMock
+    ) -> None:
+        await _register_services(mock_hass)
+        schema = self._schema(mock_hass, "set_led")
+        data = schema({"entity_id": "event.k_1", "mode": "on", "color": "#FF0000"})
+        assert data["color"] == "ff0000"
+        data = schema({"entity_id": "event.k_1", "mode": "off", "color": "00ff00"})
+        assert data["color"] == "00ff00"
+
+    @pytest.mark.asyncio
+    async def test_set_slot_led_accepts_and_normalizes_hex(
+        self, mock_hass: MagicMock
+    ) -> None:
+        await _register_services(mock_hass)
+        schema = self._schema(mock_hass, "set_slot_led")
+        data = schema(
+            {"entity_id": "event.k_1", "on_color": "#00FF00", "off_color": "FF0000"}
+        )
+        assert data["on_color"] == "00ff00"
+        assert data["off_color"] == "ff0000"
+        # Colors stay optional: mode-only calls still validate.
+        data = schema({"entity_id": "event.k_1", "led_mode": "fixed"})
+        assert "on_color" not in data
 
 
 # ── set_slot ─────────────────────────────────────────────────────────
@@ -391,6 +481,36 @@ class TestSetSlot:
         with pytest.raises(ServiceValidationError):
             await _svc_set_slot(mock_hass, call)
 
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "action",
+        [
+            {"action": "not a service"},
+            {"action": 5},
+            {"action": "light.toggle", "target": "light.x"},
+            {"action": "light.toggle", "target": ["light.x"]},
+            {"action": "light.toggle", "data": "brightness"},
+            {"action": "light.toggle", "service": "light.toggle"},
+        ],
+    )
+    async def test_malformed_action_rejected(
+        self, mock_hass: MagicMock, action: dict[str, Any]
+    ) -> None:
+        _make_runtime(mock_hass, config=_keypad_config())
+        call = _call({"ieee_address": IEEE, "slot_id": 1, "tap_action": action})
+        with pytest.raises(ServiceValidationError):
+            await _svc_set_slot(mock_hass, call)
+
+    @pytest.mark.asyncio
+    async def test_service_key_is_stored_as_action(self, mock_hass: MagicMock) -> None:
+        """The legacy "service" spelling is translated, so the action runs."""
+        _, store = _make_runtime(mock_hass, config=_keypad_config())
+        action = {"service": "script.movie", "data": {"x": 1}}
+        call = _call({"ieee_address": IEEE, "slot_id": 1, "tap_action": action})
+        await _svc_set_slot(mock_hass, call)
+        slot1 = next(s for s in store.get_device(IEEE).slots if s.slot_id == 1)
+        assert slot1.tap_action == {"action": "script.movie", "data": {"x": 1}}
+
 
 # ── push_config ──────────────────────────────────────────────────────
 
@@ -455,6 +575,17 @@ class TestDeviceResolution:
         call = _call({"ieee_address": "0xdeadbeef"})
         with pytest.raises(ServiceValidationError):
             await _svc_push_config(mock_hass, call)
+
+    @pytest.mark.asyncio
+    async def test_foreign_entity_errors(self, mock_hass: MagicMock) -> None:
+        """Another integration's entity with our attributes does not resolve."""
+        _make_runtime(mock_hass, config=_keypad_config())
+        fake_entity_registry(mock_hass).add(
+            "sensor.forged", f"{IEEE}_sensor", platform="mqtt"
+        )
+        mock_hass.states.get.return_value = _entity_state(IEEE)
+        with pytest.raises(ServiceValidationError):
+            await _svc_push_config(mock_hass, _call({"entity_id": "sensor.forged"}))
 
     @pytest.mark.asyncio
     async def test_entity_without_ieee_errors(self, mock_hass: MagicMock) -> None:

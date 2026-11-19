@@ -6,6 +6,7 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from homeassistant.exceptions import HomeAssistantError
 
 from custom_components.control4_dimmers.audit import compare_three_way, slot_readings
 from custom_components.control4_dimmers.const import DRIFT_LAYER_FIRMWARE
@@ -153,6 +154,24 @@ class TestTrackingWritesLoadColors:
             "c4.dmx.led 01 04 ffffff",
             "c4.dmx.led 01 05 ffffff",
             "c4.dmx.led 01 05 ffffff",
+        ]
+
+    @pytest.mark.asyncio
+    async def test_failed_load_color_write_is_retried(
+        self, manager: Control4Manager, dimmer_state: DeviceState
+    ) -> None:
+        """A load-color write that failed to publish isn't remembered as sent."""
+        _setup(manager, dimmer_state, _tracked_slot())
+        listener = _state_listener(manager)
+        manager.async_send_mqtt.side_effect = HomeAssistantError("disconnected")
+        await listener(_event("light.living_room", "on"))  # must not raise
+        manager.async_send_mqtt.side_effect = None
+        manager.async_send_mqtt.reset_mock()
+        await listener(_event("light.living_room", "on"))
+        assert _sent(manager) == [
+            "c4.dmx.led 01 05 ffffff",
+            "c4.dmx.led 01 03 ffffff",
+            "c4.dmx.led 01 04 ffffff",
         ]
 
     @pytest.mark.asyncio
@@ -416,7 +435,7 @@ class TestOptimisticLed:
             side_effect=lambda _ieee, payload: order.append(payload["c4_cmd"])
         )
         manager._hass.services.async_call = AsyncMock(
-            side_effect=lambda *_args: order.append("action")
+            side_effect=lambda *_args, **_kwargs: order.append("action")
         )
         await manager.execute_slot_action(IEEE_DIMMER, 2, "tap")
         assert order == [

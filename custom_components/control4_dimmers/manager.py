@@ -6,13 +6,17 @@ import asyncio
 import json
 import re
 import time
+from collections import deque
 from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, Any, ClassVar
 
 from homeassistant.components import mqtt
 from homeassistant.const import EVENT_STATE_CHANGED
+from homeassistant.core import Context
 from homeassistant.core import callback as ha_callback
+from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import device_registry as dr
+from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.event import async_track_time_interval
 from homeassistant.util import dt as dt_util
 
@@ -40,11 +44,20 @@ from .const import (
     DEVICE_TYPE_SWITCH,
     DEVICE_TYPES,
     DOMAIN,
+    LOAD_BEARING_TYPES,
     LOGGER,
     OUTLET_MODELS,
+    RELAY_MODELS,
     SLOT_COUNT,
 )
-from .models import DeviceConfig, DeviceState, SlotConfig, _extract_color
+from .models import (
+    DeviceConfig,
+    DeviceState,
+    SlotConfig,
+    _extract_color,
+    sanitize_payload,
+    valid_hex,
+)
 from .store import Control4Store  # noqa: TC001
 
 if TYPE_CHECKING:
@@ -58,6 +71,9 @@ if TYPE_CHECKING:
 # back to back they overrun the Zigbee mesh and some are silently dropped
 # (issue #144). Pacing sends this far apart makes delivery reliable.
 MIN_SEND_INTERVAL = 0.05
+
+# Seconds between dimming table reads of different devices.
+DIMMING_READ_INTERVAL = 5
 
 # Read-after-write verification (issue #145). After a single-slot push we
 # read the slot's written parameters back and compare desired vs observed,
@@ -94,6 +110,34 @@ VERIFY_TIMEOUT_MS = 5000
 # two still gets exactly one "pressed" per tap.
 PRESS_PAIR_WINDOW = 2.0
 
+# Inbound MQTT is untrusted: any client that can publish to the broker can
+# write a device's state topic or the bridge/devices list. These bound what
+# such a publisher can make the integration do.
+#
+# Software-run button actions per (ieee, slot) within ACTION_RATE_WINDOW
+# seconds. A burst beyond this (a replayed or flooded action topic) is
+# dropped instead of starting one service call per message.
+ACTION_RATE_LIMIT = 4
+ACTION_RATE_WINDOW = 1.0
+# State payloads buffered for devices not yet in a device list. Buffering
+# stops for good once the first list arrives.
+PENDING_STATES_MAX = 64
+# A device is dropped only after it is missing from this many consecutive
+# bridge/devices lists, so one forged or truncated list cannot remove every
+# device at once.
+MISSING_LISTS_TO_DROP = 2
+
+_IEEE_RE = re.compile(r"0x[0-9a-f]{16}")
+_FRIENDLY_NAME_MAX = 128
+# Anchored button grammar from the frozen MQTT contract. Click counts above
+# 4 still arrive from the converter (issue #178) and are clamped later.
+_BUTTON_PRESS_RE = re.compile(r"button_([1-6])_(press|scene)")
+_BUTTON_RELEASE_RE = re.compile(r"button_([1-6])_release")
+_BUTTON_CLICK_RE = re.compile(r"button_([1-6])_click_([1-9][0-9]?)")
+_PADDLE_RE = re.compile(
+    r"(paddle_up|paddle_down)_(?:(press|scene|release)|click_([1-9][0-9]?))"
+)
+
 # Z2M model strings that identify C4 devices
 C4_MODEL_IDS = {
     "C4-APD120",
@@ -123,14 +167,30 @@ class Control4Manager:
         self._subscriptions: list[Callable[[], None]] = []
         self._listeners: list[Callable[[], None]] = []
         self._pending_states: dict[str, dict] = {}  # buffered state payloads
+        # True once the first bridge/devices list has been processed; after
+        # that, state for unknown names is dropped instead of buffered.
+        self._device_list_seen = False
+        # ieee -> consecutive device lists the device was missing from.
+        self._missing_lists: dict[str, int] = {}
+        # (ieee, slot) -> monotonic times of recent software-run actions.
+        self._action_times: dict[tuple[str, int | str], deque[float]] = {}
         self._detect_sent: set[str] = set()  # IEEEs we've already sent c4_detect to
+        # (ieee, slot_id | paddle_id) -> callback(event_type, context)
         self._event_callbacks: dict[
-            tuple[str, int | str], Callable[[str], None]
-        ] = {}  # (ieee, slot_id | paddle_id) -> callback(event_type)
+            tuple[str, int | str], Callable[[str, Context | None], None]
+        ] = {}
         # (ieee, slot_id | paddle_id) -> (verb that fired "pressed", monotonic
         # time), waiting for the other half of the press/scene pair.
         self._press_pairs: dict[tuple[str, int | str], tuple[str, float]] = {}
         self._light_track_unsubs: list[Callable[[], None]] = []  # state listeners
+        # resolved tracked entity_id -> [(ieee, slot_id, on_color, off_color)],
+        # rebuilt by setup_light_tracking. Kept so a reconnect can re-send
+        # every tracked LED (issue #246).
+        self._led_tracking: dict[str, list[tuple[str, SlotConfig, str, str]]] = {}
+        # Last MQTT connection state reported by HA; None until the first
+        # report. A False -> True edge triggers the tracked LED resync.
+        self._mqtt_connected: bool | None = None
+        self._led_resync_task: asyncio.Task[None] | None = None
         self._led_cooldowns: dict[
             tuple[str, int], float
         ] = {}  # (ieee, slot) -> timestamp
@@ -160,6 +220,10 @@ class Control4Manager:
         self._pending_verifies: dict[tuple[str, int], asyncio.Future[None]] = {}
         self._verify_results: dict[tuple[str, int], dict[str, Any]] = {}
         self._verifying: set[tuple[str, int]] = set()
+        # Dimming table reads, spaced out so a fresh start doesn't flood the mesh.
+        self._dimming_requested: set[str] = set()
+        self._dimming_queue: deque[str] = deque()
+        self._dimming_task: asyncio.Task[None] | None = None
         # The exact field values the converter's last read-back carried for
         # a slot, captured in _handle_device_state before the pending future
         # resolves. DeviceState merges reads into whatever it already held,
@@ -222,15 +286,24 @@ class Control4Manager:
         return lambda: self._listeners.remove(callback)
 
     def notify_listeners(self) -> None:
-        """Notify all registered listeners of a state change."""
-        for callback in self._listeners:
-            callback()
+        """
+        Notify all registered listeners of a state change.
+
+        Each listener runs on its own: one entity that raises (say, a
+        sensor handed a value Home Assistant rejects) must not stop every
+        entity after it from updating.
+        """
+        for callback in list(self._listeners):
+            try:
+                callback()
+            except Exception:  # noqa: BLE001
+                LOGGER.exception("Control4 state listener %r failed", callback)
 
     def register_event_callback(
         self,
         ieee_address: str,
         slot_id: int | str,
-        callback: Callable[[str], None],
+        callback: Callable[[str, Context | None], None],
     ) -> Callable[[], None]:
         """
         Register a callback for button events on a specific slot or paddle.
@@ -238,7 +311,9 @@ class Control4Manager:
         slot_id is an int (1..6) for a button-array slot, or a paddle id
         string ("paddle_up" / "paddle_down") for a local load paddle half.
         The callback receives the event_type string (e.g. "pressed",
-        "double_tap").  Returns an unsubscribe callable.
+        "double_tap") and the Context of the press, so the event entity's
+        state write and any action the press runs share one context.
+        Returns an unsubscribe callable.
         """
         key = (ieee_address, slot_id)
         self._event_callbacks[key] = callback
@@ -252,24 +327,24 @@ class Control4Manager:
         load directly, so we only surface the event for automations; there is
         no software action to run. Returns True if the action was a paddle.
         """
-        paddle_match = re.match(
-            r"(paddle_up|paddle_down)_(?:(press|scene|release)|click_(\d+))$",
-            action_str,
-        )
+        paddle_match = _PADDLE_RE.fullmatch(action_str)
         if not paddle_match:
             return False
         paddle_id = paddle_match.group(1)
         verb = paddle_match.group(2)
+        context = Context()
         if verb == "release":
-            self.fire_button_event(device.ieee_address, paddle_id, "released")
+            self.fire_button_event(device.ieee_address, paddle_id, "released", context)
         elif verb in ("press", "scene"):
-            self._fire_pressed(device.ieee_address, paddle_id, verb)
+            self._fire_pressed(device.ieee_address, paddle_id, verb, context)
         else:  # click_N
             event_type = _click_count_to_event_type(int(paddle_match.group(3)))
-            self.fire_button_event(device.ieee_address, paddle_id, event_type)
+            self.fire_button_event(device.ieee_address, paddle_id, event_type, context)
         return True
 
-    def _fire_pressed(self, ieee: str, slot_id: int | str, verb: str) -> None:
+    def _fire_pressed(
+        self, ieee: str, slot_id: int | str, verb: str, context: Context | None = None
+    ) -> None:
         """
         Fire one "pressed" event per tap from a press/scene pair.
 
@@ -283,57 +358,108 @@ class Control4Manager:
         if pending and pending[0] != verb and now - pending[1] < PRESS_PAIR_WINDOW:
             return
         self._press_pairs[key] = (verb, now)
-        self.fire_button_event(ieee, slot_id, "pressed")
+        self.fire_button_event(ieee, slot_id, "pressed", context)
 
-    def _dispatch_button_action(self, device: DeviceState, action_str: str) -> None:
+    def _slot_exists(self, device: DeviceState, slot_id: int) -> bool:
+        """Return whether a slot belongs to the device's type (True if untyped)."""
+        allowed = DEVICE_TYPE_SLOTS.get(self._effective_type(device) or "")
+        return allowed is None or slot_id in allowed
+
+    def _allow_action(self, ieee: str, slot_id: int | str) -> bool:
+        """Rate-limit software-run actions per (ieee, slot)."""
+        key = (ieee, slot_id)
+        now = time.monotonic()
+        times = self._action_times.setdefault(key, deque())
+        while times and now - times[0] >= ACTION_RATE_WINDOW:
+            times.popleft()
+        if len(times) >= ACTION_RATE_LIMIT:
+            return False
+        times.append(now)
+        return True
+
+    def _schedule_action(
+        self, ieee: str, slot_id: int, event_type: str, context: Context
+    ) -> None:
+        """Run a slot's software action in a task, subject to the rate limit."""
+        if not self._allow_action(ieee, slot_id):
+            LOGGER.debug(
+                "Dropping %s action for %s slot %s: rate limit reached",
+                event_type,
+                ieee,
+                slot_id,
+            )
+            return
+        self._hass.async_create_task(
+            self._press_button_task(ieee, slot_id, event_type, context),
+            f"c4_action_{ieee}_{slot_id}",
+        )
+
+    def _dispatch_button_action(  # noqa: PLR0911, PLR0912
+        self, device: DeviceState, action_str: str
+    ) -> None:
         """Parse an action string from Z2M and dispatch to event entities."""
-        if not action_str:
+        if not action_str or not isinstance(action_str, str):
             return
 
         if self._dispatch_paddle_action(device, action_str):
             return
 
+        # One context per physical press, shared by the event entity's state
+        # write and any action the press runs, so the logbook and automation
+        # traces can tie the two together.
+        context = Context()
+
         # Press or scene: button_N_press (c4.dmx.bp), button_N_scene (c4.dmx.sc)
-        press_match = re.match(r"button_(\d+)_(press|scene)", action_str)
+        press_match = _BUTTON_PRESS_RE.fullmatch(action_str)
         if press_match:
             slot_id = self._button_slot(device, int(press_match.group(1)))
+            if not self._slot_exists(device, slot_id):
+                return
             is_scene = press_match.group(2) == "scene"
-            self._fire_pressed(device.ieee_address, slot_id, press_match.group(2))
+            self._fire_pressed(
+                device.ieee_address, slot_id, press_match.group(2), context
+            )
             config = self._store.get_device(device.ieee_address)
             slot = self._find_slot(config, slot_id) if config else None
             behavior = slot.behavior if slot else "keypad"
-            # Scene on load-control: firmware handled the load, software
-            # syncs LED tracking. All three load behaviors now have
-            # matching firmware modes (00=on, 01=off, 02=toggle).
-            # Press on programmable: execute tap_action immediately
-            # (unless double_tap configured — handled by click_count).
+            # Load-control behaviors: the firmware switches the load itself
+            # on a physical press (push_config writes the matching firmware
+            # mode: 00=on, 01=off, 02=toggle) and a follow_load LED tracks
+            # the light state, so neither the press nor the scene frame may
+            # drive the load from software. Doing so switched the load a
+            # second time about a second later, and a toggle landing
+            # mid-ramp left the dimmer's remembered level near zero
+            # (issue #242). Explicit press_button service calls still act.
+            # Programmable buttons: the press frame executes tap_action
+            # immediately, unless double_tap is configured, in which case
+            # the click_count frame decides. The scene frame never acts.
             is_load = behavior in ("load_on", "load_off", "toggle_load")
-            should_act = (is_scene and is_load) or (
-                not is_scene
-                and not is_load
+            if (
+                not is_load
+                and not is_scene
                 and (not slot or not slot.double_tap_action)
-            )
-            if should_act:
-                self._hass.async_create_task(
-                    self.press_button(device.ieee_address, slot_id, "pressed"),
-                    f"c4_action_{device.ieee_address}_{slot_id}",
-                )
+            ):
+                self._schedule_action(device.ieee_address, slot_id, "pressed", context)
             return
 
         # button_N_release  (from c4.dmx.br)
-        release_match = re.match(r"button_(\d+)_release", action_str)
+        release_match = _BUTTON_RELEASE_RE.fullmatch(action_str)
         if release_match:
             slot_id = self._button_slot(device, int(release_match.group(1)))
-            self.fire_button_event(device.ieee_address, slot_id, "released")
+            if not self._slot_exists(device, slot_id):
+                return
+            self.fire_button_event(device.ieee_address, slot_id, "released", context)
             return
 
         # button_N_click_C  (from c4.dmx.cc)
-        click_match = re.match(r"button_(\d+)_click_(\d+)", action_str)
+        click_match = _BUTTON_CLICK_RE.fullmatch(action_str)
         if click_match:
             slot_id = self._button_slot(device, int(click_match.group(1)))
+            if not self._slot_exists(device, slot_id):
+                return
             count = int(click_match.group(2))
             event_type = _click_count_to_event_type(count)
-            self.fire_button_event(device.ieee_address, slot_id, event_type)
+            self.fire_button_event(device.ieee_address, slot_id, event_type, context)
             # Load-control buttons: firmware handles load, skip software actions
             config = self._store.get_device(device.ieee_address)
             slot = self._find_slot(config, slot_id) if config else None
@@ -343,14 +469,12 @@ class Control4Manager:
             if count == 1:
                 # Only fires when double_tap is configured (debounced)
                 if slot and slot.double_tap_action:
-                    self._hass.async_create_task(
-                        self.press_button(device.ieee_address, slot_id, "single_tap"),
-                        f"c4_action_{device.ieee_address}_{slot_id}",
+                    self._schedule_action(
+                        device.ieee_address, slot_id, "single_tap", context
                     )
             elif count == 2:  # noqa: PLR2004
-                self._hass.async_create_task(
-                    self.press_button(device.ieee_address, slot_id, "double_tap"),
-                    f"c4_action_{device.ieee_address}_{slot_id}",
+                self._schedule_action(
+                    device.ieee_address, slot_id, "double_tap", context
                 )
             return
 
@@ -375,7 +499,13 @@ class Control4Manager:
         top, bottom = DEVICE_TYPE_SLOTS[device_type]
         return top if button <= SLOT_COUNT // 2 else bottom
 
-    def fire_button_event(self, ieee: str, slot_id: int | str, event_type: str) -> None:
+    def fire_button_event(
+        self,
+        ieee: str,
+        slot_id: int | str,
+        event_type: str,
+        context: Context | None = None,
+    ) -> None:
         """Fire a button/paddle event on the event entity for a slot."""
         if event_type not in BUTTON_EVENT_TYPES:
             # Defense in depth (issue #178): an undeclared type makes HA's
@@ -390,7 +520,7 @@ class Control4Manager:
             return
         cb = self._event_callbacks.get((ieee, slot_id))
         if cb is not None:
-            cb(event_type)
+            cb(event_type, context)
             LOGGER.debug("Button event: %s slot %s -> %s", ieee, slot_id, event_type)
 
     async def async_start(self) -> None:
@@ -411,12 +541,28 @@ class Control4Manager:
         )
         self._subscriptions.append(unsub_state)
 
+        # A publish while the broker is away fails, and a failed LED
+        # tracking push leaves the keypad showing the wrong color until
+        # the tracked light next changes. Re-sync every tracked LED once
+        # the connection is back (issue #246).
+        self._subscriptions.append(
+            mqtt.async_subscribe_connection_status(
+                self._hass, self._on_mqtt_connection_change
+            )
+        )
+
         self.start_audit_sweep()
         LOGGER.debug("Control4 manager started, subscribed to %s", topic)
 
     async def async_stop(self) -> None:
         """Unsubscribe from MQTT and state listeners."""
         self.stop_audit_sweep()
+        if self._dimming_task is not None:
+            self._dimming_task.cancel()
+            self._dimming_task = None
+        if self._led_resync_task is not None:
+            self._led_resync_task.cancel()
+            self._led_resync_task = None
         for unsub in self._subscriptions:
             unsub()
         self._subscriptions.clear()
@@ -424,10 +570,16 @@ class Control4Manager:
             unsub()
         self._light_track_unsubs.clear()
 
-    async def _handle_bridge_devices(  # noqa: PLR0912
-        self, msg: mqtt.ReceiveMessage
-    ) -> None:
-        """Handle zigbee2mqtt/bridge/devices message to discover C4 devices."""
+    async def _handle_bridge_devices(self, msg: mqtt.ReceiveMessage) -> None:
+        """
+        Handle zigbee2mqtt/bridge/devices message to discover C4 devices.
+
+        The list is untrusted input. Entries need a well-formed IEEE
+        address and a plain friendly name, a name already held by another
+        device is refused (so a forged list cannot swap two devices'
+        names and redirect their traffic), and a device is only dropped
+        after it is missing from MISSING_LISTS_TO_DROP lists in a row.
+        """
         payload = msg.payload
         if isinstance(payload, bytes):
             payload = payload.decode(errors="replace")
@@ -440,77 +592,135 @@ class Control4Manager:
         if not isinstance(payload, list):
             return
 
-        seen = set()
+        seen: set[str] = set()
+        claimed: dict[str, str] = {}  # friendly name -> ieee, this list
         for device_info in payload:
             if not isinstance(device_info, dict):
                 continue
             if not _is_control4_device(device_info):
                 continue
+            ieee = self._accept_device_entry(device_info, claimed)
+            if ieee is not None:
+                seen.add(ieee)
 
-            ieee = device_info.get("ieee_address", "")
-            if not ieee:
-                continue
-            seen.add(ieee)
-            friendly_name = device_info.get("friendly_name", ieee)
-            # Some devices prefix their Zigbee modelID (the ROS reports
-            # "c4:control4_light:C4-V-ROSW120"); keep only the model.
-            model_id = device_info.get("model_id", "").rsplit(":", 1)[-1]
-
-            if ieee not in self._devices:
-                self._devices[ieee] = DeviceState(
-                    ieee_address=ieee,
-                    friendly_name=friendly_name,
-                    model_id=model_id,
-                )
-                LOGGER.info(
-                    "Discovered Control4 device: %s (%s) model=%s",
-                    friendly_name,
-                    ieee,
-                    model_id,
-                )
-            else:
-                dev = self._devices[ieee]
-                if dev.friendly_name != friendly_name:
-                    LOGGER.info(
-                        "Device renamed: %s -> %s (%s)",
-                        dev.friendly_name,
-                        friendly_name,
-                        ieee,
-                    )
-                    dev.friendly_name = friendly_name
-                    self._update_device_registry_name(ieee, friendly_name)
-                dev.model_id = model_id
-            # The outlet relay has no c4.dmx.dim answer, so its type comes
-            # from the model. Setting it also keeps c4_detect from being
-            # sent to a device whose converter can't take it.
-            if _is_outlet(device_info):
-                self._devices[ieee].device_type = DEVICE_TYPE_OUTLET
-
-        removed = set(self._devices.keys()) - seen
-        for ieee in removed:
-            LOGGER.info("Control4 device removed: %s", ieee)
-            del self._devices[ieee]
-            self._prune_device_state(ieee)
-
-        # Apply any state payloads that arrived before discovery.
-        if self._pending_states:
-            applied = []
-            for name, payload in self._pending_states.items():
-                device = self._find_device_by_name(name)
-                if device is not None:
-                    device.update_from_mqtt(payload)
-                    self._maybe_auto_detect(device)
-                    applied.append(name)
-            for name in applied:
-                del self._pending_states[name]
-            if applied:
-                LOGGER.debug(
-                    "Applied %d buffered state payloads after discovery",
-                    len(applied),
-                )
-
+        self._drop_missing_devices(seen)
+        self._device_list_seen = True
+        self._replay_pending_states()
         self.setup_light_tracking()
         self.notify_listeners()
+
+    def _accept_device_entry(
+        self, device_info: dict[str, Any], claimed: dict[str, str]
+    ) -> str | None:
+        """
+        Apply one Control4 entry of a device list.
+
+        Returns the IEEE if the device is (still) known afterwards, so the
+        caller counts it as present, or None if the entry was refused.
+        """
+        ieee = device_info.get("ieee_address")
+        if not isinstance(ieee, str) or not _IEEE_RE.fullmatch(ieee):
+            LOGGER.warning("Ignoring Control4 device with invalid IEEE %r", ieee)
+            return None
+        friendly_name = device_info.get("friendly_name", ieee)
+        # Some devices prefix their Zigbee modelID (the ROS reports
+        # "c4:control4_light:C4-V-ROSW120"); keep only the model.
+        model_id = _str_field(device_info, "model_id").rsplit(":", 1)[-1]
+        existing = self._devices.get(ieee)
+
+        name_ok = _valid_friendly_name(friendly_name)
+        if not name_ok:
+            LOGGER.warning(
+                "Ignoring invalid friendly name %r for Control4 device %s",
+                friendly_name,
+                ieee,
+            )
+        else:
+            holder = self._find_device_by_name(friendly_name)
+            taken = (holder is not None and holder.ieee_address != ieee) or (
+                claimed.get(friendly_name, ieee) != ieee
+            )
+            if taken:
+                LOGGER.warning(
+                    "Ignoring friendly name %r for Control4 device %s: "
+                    "another device already uses it",
+                    friendly_name,
+                    ieee,
+                )
+                name_ok = False
+
+        if existing is None:
+            if not name_ok:
+                return None
+            claimed[friendly_name] = ieee
+            existing = DeviceState(
+                ieee_address=ieee,
+                friendly_name=friendly_name,
+                model_id=model_id,
+            )
+            self._devices[ieee] = existing
+            LOGGER.info(
+                "Discovered Control4 device: %r (%s) model=%r",
+                friendly_name,
+                ieee,
+                model_id,
+            )
+        else:
+            if name_ok and existing.friendly_name != friendly_name:
+                LOGGER.warning(
+                    "Control4 device renamed: %r -> %r (%s)",
+                    existing.friendly_name,
+                    friendly_name,
+                    ieee,
+                )
+                existing.friendly_name = friendly_name
+                self._update_device_registry_name(ieee, friendly_name)
+            claimed[existing.friendly_name] = ieee
+            existing.model_id = model_id
+        # The outlet relay has no c4.dmx.dim answer, so its type comes
+        # from the model. Setting it also keeps c4_detect from being
+        # sent to a device whose converter can't take it.
+        if _is_outlet(device_info):
+            existing.device_type = DEVICE_TYPE_OUTLET
+        return ieee
+
+    def _drop_missing_devices(self, seen: set[str]) -> None:
+        """Drop devices missing from MISSING_LISTS_TO_DROP lists in a row."""
+        for ieee in list(self._devices):
+            if ieee in seen:
+                self._missing_lists.pop(ieee, None)
+                continue
+            misses = self._missing_lists.get(ieee, 0) + 1
+            if misses < MISSING_LISTS_TO_DROP:
+                self._missing_lists[ieee] = misses
+                LOGGER.info(
+                    "Control4 device %s missing from the device list; it is "
+                    "removed if the next list leaves it out too",
+                    ieee,
+                )
+                continue
+            LOGGER.warning("Control4 device removed: %s", ieee)
+            del self._devices[ieee]
+            self._missing_lists.pop(ieee, None)
+            self._prune_device_state(ieee)
+
+    def _replay_pending_states(self) -> None:
+        """Apply state payloads that arrived before the first device list."""
+        pending, self._pending_states = self._pending_states, {}
+        applied = 0
+        for name, payload in pending.items():
+            device = self._find_device_by_name(name)
+            if device is None:
+                continue
+            try:
+                device.update_from_mqtt(payload)
+                self._maybe_auto_detect(device)
+            except Exception:  # noqa: BLE001
+                LOGGER.exception("Could not apply buffered state for %r", name)
+                continue
+            applied += 1
+        if applied:
+            LOGGER.debug("Applied %d buffered state payloads after discovery", applied)
 
     def _prune_device_state(self, ieee: str) -> None:
         """
@@ -532,6 +742,14 @@ class Control4Manager:
             self._verifying.discard(key)
         for key in [k for k in self._verify_reads if k[0] == ieee]:
             del self._verify_reads[key]
+        for key in [k for k in self._press_pairs if k[0] == ieee]:
+            del self._press_pairs[key]
+        for key in [k for k in self._action_times if k[0] == ieee]:
+            del self._action_times[key]
+        for key in [k for k in self._led_cooldowns if k[0] == ieee]:
+            del self._led_cooldowns[key]
+        self._detect_sent.discard(ieee)
+        self._dimming_requested.discard(ieee)
         self._audit_attempts.pop(ieee, None)
         self._audit_summaries.pop(ieee, None)
 
@@ -557,30 +775,44 @@ class Control4Manager:
                 return
         if not isinstance(payload, dict):
             return
+        payload = sanitize_payload(payload)
 
         device = self._find_device_by_name(device_name)
         if device is None:
             # Device not yet known (bridge/devices may not have arrived).
-            # Buffer the payload so it can be applied after discovery.
-            self._pending_states[device_name] = payload
+            # Buffer the payload so it can be applied after discovery, but
+            # only until the first device list, and only up to a cap: every
+            # non-C4 Zigbee device (and any name a broker client invents)
+            # lands here too.
+            if not self._device_list_seen and (
+                device_name in self._pending_states
+                or len(self._pending_states) < PENDING_STATES_MAX
+            ):
+                self._pending_states[device_name] = payload
             return
 
         device.update_from_mqtt(payload)
 
-        # Resolve a pending read-back verify (issue #145). The converter
-        # echoes c4_verified_slot alongside the observed values in the same
-        # payload, so by the time we get here DeviceState already holds the
-        # observed values the verify pass will compare against.
-        verified_slot = payload.get("c4_verified_slot")
-        if verified_slot is not None:
-            self._resolve_verify(device.ieee_address, verified_slot, payload)
+        # A retained message is a replay of old state (from the broker, at
+        # every Home Assistant start and reload), not something the device
+        # just did. Its state is still applied above, but it must not run a
+        # button's action or answer a verify read.
+        if getattr(msg, "retain", False) is not True:
+            # Resolve a pending read-back verify (issue #145). The converter
+            # echoes c4_verified_slot alongside the observed values in the
+            # same payload, so by the time we get here DeviceState already
+            # holds the observed values the verify pass will compare against.
+            verified_slot = payload.get("c4_verified_slot")
+            if verified_slot is not None:
+                self._resolve_verify(device.ieee_address, verified_slot, payload)
 
-        # Dispatch button action events (press / click) to event entities.
-        action = payload.get("action")
-        if action:
-            self._dispatch_button_action(device, action)
+            # Dispatch button action events (press / click) to event entities.
+            action = payload.get("action")
+            if action:
+                self._dispatch_button_action(device, action)
 
         self._maybe_auto_detect(device)
+        self._maybe_read_dimming(device)
 
         self.notify_listeners()
 
@@ -591,12 +823,23 @@ class Control4Manager:
                 return device
         return None
 
-    def get_device_info(self, ieee_address: str) -> dict[str, Any] | None:
-        """Get combined device state + config for the websocket API."""
+    def get_device_info(
+        self, ieee_address: str, *, include_action_data: bool = True
+    ) -> dict[str, Any] | None:
+        """
+        Get combined device state + config for the websocket API.
+
+        include_action_data=False drops the data of every stored slot
+        action. Action data can hold secrets (an alarm code, a token for a
+        REST call), so only administrators get to read it.
+        """
         state = self._devices.get(ieee_address)
         if state is None:
             return None
         config = self._store.get_device(ieee_address)
+        config_dict = config.to_dict() if config else None
+        if config_dict is not None and not include_action_data:
+            config_dict = _strip_action_data(config_dict)
         return {
             "ieee_address": ieee_address,
             "friendly_name": state.friendly_name,
@@ -607,15 +850,26 @@ class Control4Manager:
             "state": state.state,
             "led_colors": {str(k): v for k, v in state.led_colors.items()},
             "button_configs": {str(k): v for k, v in state.button_configs.items()},
-            "config": config.to_dict() if config else None,
+            "config": config_dict,
+            # The entity that drives this device's own load, resolved here
+            # through the registries so the card never has to guess it
+            # from a friendly name.
+            "load_entity_id": self.load_entity_id(ieee_address),
         }
 
-    def get_all_devices_info(self) -> list[dict[str, Any]]:
+    def get_all_devices_info(
+        self, *, include_action_data: bool = True
+    ) -> list[dict[str, Any]]:
         """Get info for all discovered devices."""
         return [
             info
             for ieee in self._devices
-            if (info := self.get_device_info(ieee)) is not None
+            if (
+                info := self.get_device_info(
+                    ieee, include_action_data=include_action_data
+                )
+            )
+            is not None
         ]
 
     async def async_configure_device(
@@ -629,7 +883,7 @@ class Control4Manager:
         """Save device configuration and push LED colors via MQTT."""
         state = self._devices.get(ieee_address)
         if state is None:
-            LOGGER.error("Cannot configure unknown device: %s", ieee_address)
+            LOGGER.error("Cannot configure unknown device: %r", ieee_address)
             return
 
         config = self._store.get_device(ieee_address) or DeviceConfig(
@@ -654,7 +908,11 @@ class Control4Manager:
             config.backlight_color = backlight_color
 
         config.friendly_name = state.friendly_name
-        if state.device_type:
+        # The live type comes from MQTT and is untrusted. Record it only
+        # when the stored config has no type yet (the type the user saw in
+        # the card is then this live one); never let a live report replace
+        # a stored type.
+        if state.device_type and not config.effective_type:
             config.device_type = state.device_type
 
         # Seed default slots when a device is typed but has no slots yet.
@@ -689,12 +947,19 @@ class Control4Manager:
         Resends the stored slot config over MQTT, rebuilds light
         tracking, and notifies listeners without mutating anything in
         the store. Returns False if the device or its config is unknown.
+        Raises HomeAssistantError if a push to the device is already in
+        flight, so repeated calls cannot queue up bursts of mesh traffic
+        (issue #144).
         """
         state = self._devices.get(ieee_address)
         config = self._store.get_device(ieee_address)
         if state is None or config is None:
             LOGGER.error("Cannot push config for unknown device: %s", ieee_address)
             return False
+        lock = self._push_locks.get(ieee_address)
+        if lock is not None and lock.locked():
+            msg = f"A config push to {state.friendly_name} is already in progress"
+            raise HomeAssistantError(msg)
         await self._push_slot_config(state, config)
         self.setup_light_tracking()
         self.notify_listeners()
@@ -768,9 +1033,12 @@ class Control4Manager:
         """
         if config.backlight_color is None:
             return
+        color = _cmd_color(config.backlight_color, state, "backlight")
+        if color is None:
+            return
         await self.async_send_mqtt(
             state.ieee_address,
-            {"c4_cmd": f"c4.dmx.blc 00 05 {config.backlight_color}"},
+            {"c4_cmd": f"c4.dmx.blc 00 05 {color}"},
         )
 
     async def _push_single_slot(
@@ -889,6 +1157,14 @@ class Control4Manager:
                 # the shared push path and needs its own slot resolution.
                 await self._push_single_slot(state, config, slot_id)
                 settle = VERIFY_RETRY_SETTLE_MS / 1000
+        except HomeAssistantError as err:
+            # A re-push could not be published (MQTT away, issue #246).
+            LOGGER.warning(
+                "Verify pass for %s slot %d stopped, MQTT publish failed: %s",
+                state.friendly_name,
+                slot_id,
+                err,
+            )
         except Exception:  # noqa: BLE001
             LOGGER.exception(
                 "Verify pass errored for %s slot %d", state.friendly_name, slot_id
@@ -918,7 +1194,13 @@ class Control4Manager:
         self._pending_verifies[key] = future
         self._verify_reads.pop(key, None)
         try:
-            await self.async_send_mqtt(ieee, {"c4_verify_slot": slot_id})
+            if not await self.async_try_send_mqtt(
+                ieee, {"c4_verify_slot": slot_id}, f"verify read of slot {slot_id}"
+            ):
+                # The read never left HA (typically the MQTT client is
+                # disconnected). Treat it like a timeout: the caller counts
+                # the slot unread and moves on (issue #246).
+                return None
             try:
                 await asyncio.wait_for(future, timeout=VERIFY_TIMEOUT_MS / 1000)
             except TimeoutError:
@@ -1070,15 +1352,20 @@ class Control4Manager:
         the waiting pass compares against what was actually read, not
         against DeviceState's merge of this read over older cached values.
         """
+        if isinstance(slot_id, bool):
+            return
         try:
             key = (ieee, int(slot_id))
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
+            return
+        future = self._pending_verifies.get(key)
+        # Only keep a read-back somebody is waiting for, so a publisher
+        # cannot grow _verify_reads with arbitrary slot numbers.
+        if future is None or future.done():
             return
         if payload is not None:
             self._verify_reads[key] = _extract_slot_fields(payload, key[1])
-        future = self._pending_verifies.get(key)
-        if future is not None and not future.done():
-            future.set_result(None)
+        future.set_result(None)
 
     # ── Periodic config audit sweep (issue #199) ─────────────────────
     #
@@ -1192,6 +1479,10 @@ class Control4Manager:
             LOGGER.error("Cannot audit unknown device: %s", ieee)
             return None
         mode = mode if mode in AUDIT_MODES else self.audit_mode
+        # Only the pass that raised the flag may lower it. A manual
+        # audit_config that runs while a sweep pass is in flight must not
+        # clear the sweep's flag, or the next tick would overlap it.
+        owns_running_flag = not self._audit_running
         self._audit_running = True
         started = dt_util.utcnow()
         self._audit_attempts[ieee] = started
@@ -1229,10 +1520,19 @@ class Control4Manager:
                     await self._audit_slot(state, config, slot, mode, summary)
                 finally:
                     self._verifying.discard(key)
+        except HomeAssistantError as err:
+            # A heal could not be published (MQTT away, issue #246). The
+            # sweep picks this device up again on a later tick.
+            LOGGER.warning(
+                "Audit pass for %s stopped, MQTT publish failed: %s",
+                state.friendly_name,
+                err,
+            )
         except Exception:  # noqa: BLE001
             LOGGER.exception("Audit pass errored for %s", state.friendly_name)
         finally:
-            self._audit_running = False
+            if owns_running_flag:
+                self._audit_running = False
         summary["finished"] = dt_util.utcnow().isoformat()
         self._audit_summaries[ieee] = summary
         LOGGER.info(
@@ -1515,33 +1815,39 @@ class Control4Manager:
         #   - push_release: press color / release color
         #   - fixed (Programmed): mode 03 / mode 04 alone don't light
         #     the LED; the mode-05 override below is what drives it.
+        # Stored colors are validated on input and on load; check again
+        # here, where they are spliced into a firmware command.
+        on_color = _cmd_color(slot.led_on_color, state, f"slot {slot.slot_id} on")
+        off_color = _cmd_color(slot.led_off_color, state, f"slot {slot.slot_id} off")
         # An LED tracking another entity gets that entity's current color
         # instead (see _send_tracked_led_color for why all three).
         tracked_color = self._tracked_led_color(slot)
         if tracked_color is not None:
             await self._send_tracked_led_color(
-                state.ieee_address, wire_id, tracked_color
+                state.ieee_address, wire_id, tracked_color, strict=True
             )
         else:
             self._tracked_load_colors.pop((state.ieee_address, wire_id), None)
-            await self.async_send_mqtt(
-                state.ieee_address,
-                {"c4_cmd": f"c4.dmx.led {wire_id:02x} 03 {slot.led_on_color}"},
-            )
-            await self.async_send_mqtt(
-                state.ieee_address,
-                {"c4_cmd": f"c4.dmx.led {wire_id:02x} 04 {slot.led_off_color}"},
-            )
+            if on_color is not None:
+                await self.async_send_mqtt(
+                    state.ieee_address,
+                    {"c4_cmd": f"c4.dmx.led {wire_id:02x} 03 {on_color}"},
+                )
+            if off_color is not None:
+                await self.async_send_mqtt(
+                    state.ieee_address,
+                    {"c4_cmd": f"c4.dmx.led {wire_id:02x} 04 {off_color}"},
+                )
         # Programmed-mode display. Without a Composer programming
         # engine driving the firmware's internal "state", neither
         # mode 03 nor mode 04 lights the LED in Programmed mode.
         # Mode 05 is the explicit override that does. The chassis
         # editor's single "Color" picker for fixed mode binds to
         # led_off_color, so the user's picked color lives there.
-        if slot.led_mode == "fixed" and tracked_color is None:
+        if slot.led_mode == "fixed" and tracked_color is None and off_color is not None:
             await self.async_send_mqtt(
                 state.ieee_address,
-                {"c4_cmd": f"c4.dmx.led {wire_id:02x} 05 {slot.led_off_color}"},
+                {"c4_cmd": f"c4.dmx.led {wire_id:02x} 05 {off_color}"},
             )
         # Store behavior and LED mode in Z2M state for frontend.
         firmware_led_mode = "programmed" if slot.led_mode == "fixed" else slot.led_mode
@@ -1562,15 +1868,52 @@ class Control4Manager:
         return None
 
     def _find_light_entity(self, ieee: str) -> str | None:
-        """Find the Z2M light entity for a C4 device by friendly_name match."""
+        """
+        Find the Zigbee2MQTT light entity that drives a device's own load.
+
+        Resolved through the registries: the light of the MQTT device that
+        Zigbee2MQTT registers for this IEEE. If that device is not found
+        (an older Zigbee2MQTT, discovery disabled) it falls back to a
+        friendly-name match, but only among MQTT lights, so a device
+        renamed after another integration's light can never point its load
+        at that light.
+        """
         device = self._devices.get(ieee)
         if device is None:
             return None
+        ent_reg = er.async_get(self._hass)
+        z2m_device = dr.async_get(self._hass).async_get_device(
+            identifiers={("mqtt", f"zigbee2mqtt_{ieee}")}
+        )
+        if z2m_device is not None:
+            for entry in er.async_entries_for_device(ent_reg, z2m_device.id):
+                if entry.domain == "light" and entry.platform == "mqtt":
+                    return entry.entity_id
         for state in self._hass.states.async_all("light"):
-            friendly = state.attributes.get("friendly_name", "")
-            if friendly == device.friendly_name:
+            if state.attributes.get("friendly_name", "") != device.friendly_name:
+                continue
+            entry = ent_reg.async_get(state.entity_id)
+            if entry is not None and entry.platform == "mqtt":
                 return state.entity_id
         return None
+
+    def load_entity_id(self, ieee: str) -> str | None:
+        """
+        Return the entity that drives a device's own load, if there is one.
+
+        A relay-only switch owns its load entity (this integration's
+        switch); everything else uses Zigbee2MQTT's light.
+        """
+        device = self._devices.get(ieee)
+        if device is None:
+            return None
+        if self._effective_type(device) == DEVICE_TYPE_SWITCH:
+            switch_id = er.async_get(self._hass).async_get_entity_id(
+                "switch", DOMAIN, f"{ieee}_switch"
+            )
+            if switch_id:
+                return switch_id
+        return self._find_light_entity(ieee)
 
     def _resolve_entity_id(self, ieee: str, entity_id: str) -> str | None:
         """Resolve __self_load__ to the actual light entity, or return as-is."""
@@ -1589,7 +1932,7 @@ class Control4Manager:
             return None
         target = self._hass.states.get(slot.led_track_entity_id)
         is_on = target is not None and target.state == "on"
-        return slot.led_on_color if is_on else slot.led_off_color
+        return valid_hex(slot.led_on_color if is_on else slot.led_off_color)
 
     async def _send_tracked_led_color(
         self,
@@ -1597,6 +1940,8 @@ class Control4Manager:
         wire_id: int,
         color: str,
         modes: tuple[int, ...] = (5, 3, 4),
+        *,
+        strict: bool = False,
     ) -> None:
         """
         Show a tracked color on an LED, so its own load cannot repaint it.
@@ -1606,13 +1951,22 @@ class Control4Manager:
         replaces the mode-05 override. Writing the tracked color to all
         three keeps the LED on the tracked entity's color either way. The
         visible override goes first so the change shows without waiting.
+
+        A failed publish raises when strict (a config push, where the
+        caller sees the error) and is logged otherwise (LED tracking, which
+        nothing awaits). The load colors are only remembered as written
+        when every write went out, so a later update retries them.
         """
+        sent_all = True
         for mode in modes:
-            await self.async_send_mqtt(
-                ieee,
-                {"c4_cmd": f"c4.dmx.led {wire_id:02x} {mode:02x} {color}"},
-            )
-        if {3, 4}.issubset(modes):
+            payload = {"c4_cmd": f"c4.dmx.led {wire_id:02x} {mode:02x} {color}"}
+            if strict:
+                await self.async_send_mqtt(ieee, payload)
+            elif not await self.async_try_send_mqtt(
+                ieee, payload, f"tracked LED color for wire {wire_id:02x}"
+            ):
+                sent_all = False
+        if {3, 4}.issubset(modes) and sent_all:
             self._tracked_load_colors[(ieee, wire_id)] = color
 
     async def _update_tracked_load_colors(
@@ -1630,9 +1984,20 @@ class Control4Manager:
         await self._send_tracked_led_color(ieee, wire_id, color, modes=(3, 4))
 
     async def press_button(
-        self, ieee: str, slot_id: int, event_type: str = "pressed"
+        self,
+        ieee: str,
+        slot_id: int,
+        event_type: str = "pressed",
+        context: Context | None = None,
     ) -> None:
-        """Handle a button press — firmware load control or software action."""
+        """
+        Handle a button press: firmware load control or software action.
+
+        context is passed to every service call the press makes. For a
+        press_button service call it is the caller's context, so Home
+        Assistant applies that user's permissions to the bound action; for
+        a physical press it is the integration context of that press.
+        """
         config = self._store.get_device(ieee)
         slot = self._find_slot(config, slot_id) if config else None
         behavior = slot.behavior if slot else "keypad"
@@ -1646,7 +2011,7 @@ class Control4Manager:
                     "toggle_load": "toggle",
                 }[behavior]
                 await self._hass.services.async_call(
-                    "light", svc, {"entity_id": light_entity}
+                    "light", svc, {"entity_id": light_entity}, context=context
                 )
             else:
                 # No HA light entity matches this device's friendly
@@ -1655,7 +2020,8 @@ class Control4Manager:
                 # button never went through HA, so no light entity got
                 # auto-discovered with a matching name. Fake a press by
                 # publishing the on/off command straight to the
-                # device's Z2M topic; Z2M sends the standard Zigbee
+                # device's Z2M set topic (addressed by IEEE); Z2M
+                # sends the standard Zigbee
                 # on/off cluster command and the keypad firmware
                 # toggles the local load just as it would for a
                 # physical button press.
@@ -1673,10 +2039,14 @@ class Control4Manager:
                 "triple_tap": "triple_tap",
                 "hold": "hold",
             }.get(event_type, "tap")
-            await self.execute_slot_action(ieee, slot_id, trigger)
+            await self.execute_slot_action(ieee, slot_id, trigger, context=context)
 
     async def execute_slot_action(
-        self, ieee: str, slot_id: int, trigger: str = "tap"
+        self,
+        ieee: str,
+        slot_id: int,
+        trigger: str = "tap",
+        context: Context | None = None,
     ) -> None:
         """
         Execute the HA-native action dict for a slot.
@@ -1699,24 +2069,35 @@ class Control4Manager:
         action = action_map.get(trigger)
         if not action:
             return
+        if not isinstance(action, dict):
+            LOGGER.error("Invalid %s action for slot %s: %r", trigger, slot_id, action)
+            return
 
         service = action.get("action", "")
-        if "." not in service:
-            LOGGER.error("Invalid action service: %s", service)
+        if not isinstance(service, str) or "." not in service:
+            LOGGER.error("Invalid action service: %r", service)
+            return
+        target = action.get("target") or {}
+        data = action.get("data") or {}
+        if not isinstance(target, dict) or not isinstance(data, dict):
+            LOGGER.error(
+                "Invalid target or data in %s action for slot %s", trigger, slot_id
+            )
             return
 
         domain, svc_name = service.split(".", 1)
-        target = action.get("target", {})
         entity_id = self._resolve_entity_id(ieee, target.get("entity_id", ""))
 
         load_color_writes: list[tuple[int, str]] = []
         if slot.led_track_entity_id:
             load_color_writes = await self.async_optimistic_led(ieee, slot_id, service)
 
-        service_data = dict(action.get("data", {}))
+        service_data = dict(data)
         if entity_id:
             service_data["entity_id"] = entity_id
-        await self._hass.services.async_call(domain, svc_name, service_data)
+        await self._hass.services.async_call(
+            domain, svc_name, service_data, context=context
+        )
 
         # The visible overrides went out before the action; the load-color
         # writes that keep them in place can wait until after it.
@@ -1764,11 +2145,14 @@ class Control4Manager:
                 self._resolve_entity_id(ieee, slot.led_track_entity_id) != track_entity
             ):
                 continue
-            color = slot.led_on_color if will_be_on else slot.led_off_color
+            color = valid_hex(slot.led_on_color if will_be_on else slot.led_off_color)
+            if color is None:
+                continue
             wire_id = slot.slot_id - 1
-            await self.async_send_mqtt(
+            await self.async_try_send_mqtt(
                 ieee,
                 {"c4_cmd": f"c4.dmx.led {wire_id:02x} 05 {color}"},
+                f"optimistic LED for slot {slot.slot_id}",
             )
             self._led_cooldowns[(ieee, slot.slot_id)] = cooldown_until
             if slot.tracks_other_entity:
@@ -1796,11 +2180,14 @@ class Control4Manager:
             for slot in config.slots:
                 if slot.led_track_entity_id:
                     resolved = self._resolve_entity_id(ieee, slot.led_track_entity_id)
-                    if resolved:
+                    on_color = valid_hex(slot.led_on_color)
+                    off_color = valid_hex(slot.led_off_color)
+                    if resolved and on_color and off_color:
                         tracking.setdefault(resolved, []).append(
-                            (ieee, slot, slot.led_on_color, slot.led_off_color)
+                            (ieee, slot, on_color, off_color)
                         )
 
+        self._led_tracking = tracking
         if not tracking:
             LOGGER.debug("Light tracking: no tracked entities found")
             return
@@ -1821,16 +2208,14 @@ class Control4Manager:
                 cooldown = self._led_cooldowns.get((ieee, slot.slot_id), 0)
                 if now < cooldown:
                     continue
-                wire_id = slot.slot_id - 1
                 color = on_color if is_on else off_color
-                # Mode 05 = immediate override — forces the LED to display
-                # this color now, bypassing the on/off state logic.
-                await self.async_send_mqtt(
-                    ieee,
-                    {"c4_cmd": f"c4.dmx.led {wire_id:02x} 05 {color}"},
-                )
+                # HA runs this listener as a task nobody awaits, so a
+                # publish error here would only surface as "Task exception
+                # was never retrieved" (issue #246). _send_tracked_led logs
+                # it instead; the reconnect resync repairs the LED later.
+                await self._send_tracked_led(ieee, slot.slot_id, color)
                 if slot.tracks_other_entity:
-                    load_color_writes.append((ieee, wire_id, color))
+                    load_color_writes.append((ieee, slot.slot_id - 1, color))
             # Every visible override first, then the load-on/load-off colors
             # that keep them in place, so no LED waits behind another's.
             for ieee, wire_id, color in load_color_writes:
@@ -1843,6 +2228,77 @@ class Control4Manager:
             len(tracking),
             list(tracking.keys()),
         )
+
+    async def _send_tracked_led(self, ieee: str, slot_id: int, color: str) -> bool:
+        """
+        Force a tracked slot's LED to a color; log instead of raise on failure.
+
+        Mode 05 = immediate override: the LED shows this color now,
+        bypassing the firmware's on/off state logic.
+        """
+        wire_id = slot_id - 1
+        clean = valid_hex(color)
+        if clean is None:
+            LOGGER.error("Not sending invalid LED color %r for slot %s", color, slot_id)
+            return False
+        return await self.async_try_send_mqtt(
+            ieee,
+            {"c4_cmd": f"c4.dmx.led {wire_id:02x} 05 {clean}"},
+            f"LED tracking update for slot {slot_id}",
+        )
+
+    @ha_callback
+    def _on_mqtt_connection_change(self, connected: bool) -> None:  # noqa: FBT001
+        """
+        React to HA's MQTT connection status (issue #246).
+
+        Sends attempted while the client was away have failed and been
+        logged. Once the connection is back, re-send every tracked LED
+        so a lost update does not leave a keypad showing a stale color.
+        """
+        was_connected = self._mqtt_connected
+        self._mqtt_connected = connected
+        if not connected:
+            LOGGER.warning(
+                "MQTT disconnected; LED tracking updates will be dropped until "
+                "it reconnects"
+            )
+            return
+        if was_connected is True:
+            return
+        LOGGER.info("MQTT connected; re-syncing tracked LEDs")
+        if self._led_resync_task is not None and not self._led_resync_task.done():
+            return
+        self._led_resync_task = self._hass.async_create_task(
+            self.async_resync_tracked_leds(), "c4_led_resync"
+        )
+
+    async def async_resync_tracked_leds(self) -> int:
+        """
+        Re-send the LED color of every slot that tracks another entity.
+
+        Uses the tracked entities' current HA state, so the result is the
+        same as if every state change had been delivered. Returns the
+        number of LED commands sent.
+        """
+        sent = 0
+        for entity_id, slots in self._led_tracking.items():
+            target = self._hass.states.get(entity_id)
+            if target is None:
+                continue
+            is_on = target.state == "on"
+            for ieee, slot, on_color, off_color in slots:
+                if ieee not in self._devices:
+                    continue
+                color = on_color if is_on else off_color
+                if await self._send_tracked_led(ieee, slot.slot_id, color):
+                    sent += 1
+                if slot.tracks_other_entity:
+                    await self._update_tracked_load_colors(
+                        ieee, slot.slot_id - 1, color
+                    )
+        LOGGER.debug("LED tracking resync: %d LED update(s) sent", sent)
+        return sent
 
     def _update_device_registry_name(self, ieee: str, new_name: str) -> None:
         """Update the HA device registry when a device is renamed in Z2M."""
@@ -1864,7 +2320,160 @@ class Control4Manager:
         """Send c4_detect after a short delay to let Z2M finish device setup."""
         await asyncio.sleep(3)
         LOGGER.info("Auto-detecting device type for %s", ieee_address)
-        await self.async_send_mqtt(ieee_address, {"c4_detect": True})
+        if not await self.async_try_send_mqtt(
+            ieee_address, {"c4_detect": True}, "device type detection"
+        ):
+            # Let the next state payload from this device try again.
+            self._detect_sent.discard(ieee_address)
+
+    def is_relay(self, ieee_address: str) -> bool:
+        """Return whether a device can only switch its load, not dim it."""
+        device = self._devices.get(ieee_address)
+        if device is None:
+            return False
+        if device.raw.get("c4_model") in RELAY_MODELS:
+            return True
+        return self._effective_type(device) == DEVICE_TYPE_SWITCH
+
+    def has_load(self, ieee_address: str) -> bool:
+        """Return whether a device's type drives a load (so it can meter one)."""
+        device = self._devices.get(ieee_address)
+        if device is None:
+            return False
+        return self._effective_type(device) in (
+            *LOAD_BEARING_TYPES,
+            DEVICE_TYPE_OUTLET,
+        )
+
+    def confirmed_type(self, ieee_address: str) -> str | None:
+        """
+        Return a device's type when it does not rest on live MQTT alone.
+
+        That is the stored type (detected and saved, or an override the
+        user set), or the outlet type assigned from the device model.
+        Returns None for a device whose only type is a live MQTT report.
+        """
+        config = self._store.get_device(ieee_address)
+        if config and config.effective_type:
+            return config.effective_type
+        device = self._devices.get(ieee_address)
+        if device and device.device_type == DEVICE_TYPE_OUTLET:
+            return DEVICE_TYPE_OUTLET
+        return None
+
+    def has_dimming_table(self, ieee_address: str) -> bool:
+        """
+        Return whether a device drives a dimmable load with a dimming table.
+
+        Keypads and the outlet have no dimmable load, and a relay only
+        switches its load, so the table means nothing on any of them.
+        """
+        device = self._devices.get(ieee_address)
+        if device is None:
+            return False
+        load_bearing = self._effective_type(device) in LOAD_BEARING_TYPES
+        return load_bearing and not self.is_relay(ieee_address)
+
+    def _effective_type(self, device: DeviceState) -> str | None:
+        """Return a device's stored type override, else its detected type."""
+        config = self._store.get_device(device.ieee_address)
+        return (config.effective_type if config else None) or device.device_type
+
+    def _maybe_read_dimming(self, device: DeviceState) -> None:
+        """
+        Queue one dimming table read for a load device with no known values.
+
+        Z2M keeps the values in its state cache and republishes them, so this
+        only sends Zigbee traffic the first time a device is seen.
+        """
+        ieee = device.ieee_address
+        if (
+            not self.has_dimming_table(ieee)
+            or ieee in self._dimming_requested
+            or any(key.startswith("c4_tv_") for key in device.raw)
+        ):
+            return
+        self._dimming_requested.add(ieee)
+        self._dimming_queue.append(ieee)
+        if self._dimming_task is None or self._dimming_task.done():
+            self._dimming_task = self._hass.async_create_background_task(
+                self._async_read_dimming_queue(), "c4_read_dimming"
+            )
+
+    async def _async_read_dimming_queue(self) -> None:
+        """Read queued dimming tables one device at a time, to spare the mesh."""
+        while self._dimming_queue:
+            ieee = self._dimming_queue.popleft()
+            if not await self.async_try_send_mqtt(
+                ieee, {"c4_read_dimming": True}, "dimming table read"
+            ):
+                # Let the next state payload from this device queue it again.
+                self._dimming_requested.discard(ieee)
+            await asyncio.sleep(DIMMING_READ_INTERVAL)
+
+    async def async_set_dimming(
+        self, ieee_address: str, param: str, value: int
+    ) -> None:
+        """Write one dimming table parameter; the converter publishes the read-back."""
+        await self.async_send_mqtt(
+            ieee_address, {"c4_cmd": f"c4.dm.tv 00 {param} {value:08x}"}
+        )
+
+    async def _press_button_task(
+        self,
+        ieee: str,
+        slot_id: int,
+        event_type: str,
+        context: Context | None = None,
+    ) -> None:
+        """Run press_button from a fire-and-forget task; log any failure."""
+        try:
+            await self.press_button(ieee, slot_id, event_type, context=context)
+        except HomeAssistantError as err:
+            state = self._devices.get(ieee)
+            LOGGER.warning(
+                "Button action for %s slot %s (%s) failed: %s",
+                state.friendly_name if state else ieee,
+                slot_id,
+                event_type,
+                err,
+            )
+        except Exception:  # noqa: BLE001
+            # Nothing awaits this task, so an unexpected error (a bad stored
+            # action, a service that raises something other than a
+            # HomeAssistantError) would otherwise surface only as "Task
+            # exception was never retrieved".
+            state = self._devices.get(ieee)
+            LOGGER.exception(
+                "Button action for %s slot %s (%s) errored",
+                state.friendly_name if state else ieee,
+                slot_id,
+                event_type,
+            )
+
+    async def async_try_send_mqtt(
+        self, ieee_address: str, payload: dict[str, Any], what: str
+    ) -> bool:
+        """
+        Send like async_send_mqtt, but log a failed publish instead of raising.
+
+        For fire-and-forget paths (LED tracking, detection, background
+        reads) where nothing awaits the result, so an exception would only
+        show up as an unretrieved task exception (issue #246). Returns
+        whether the publish succeeded.
+        """
+        try:
+            await self.async_send_mqtt(ieee_address, payload)
+        except HomeAssistantError as err:
+            state = self._devices.get(ieee_address)
+            LOGGER.warning(
+                "%s for %s not sent, MQTT publish failed: %s",
+                what[:1].upper() + what[1:],
+                state.friendly_name if state else ieee_address,
+                err,
+            )
+            return False
+        return True
 
     async def async_send_mqtt(self, ieee_address: str, payload: dict[str, Any]) -> None:
         """
@@ -1877,17 +2486,24 @@ class Control4Manager:
         button_N_* state writes that describe them in the order they were
         issued. Sends to different devices use different locks and may
         overlap. A publish that raises propagates to the caller unchanged.
+
+        The topic addresses the device by IEEE (<base>/<ieee>/set), which
+        Zigbee2MQTT accepts alongside the friendly name. Friendly names
+        come from the device list on the broker, so a forged list that
+        swaps two names would otherwise redirect commands to the wrong
+        device. The IEEE is the key this integration tracks the device by.
         """
         state = self._devices.get(ieee_address)
         if state is None:
-            return
-        topic = f"{self.mqtt_topic}/{state.friendly_name}/set"
+            msg = f"Unknown or undiscovered Control4 device: {ieee_address!r}"
+            raise HomeAssistantError(msg)
+        topic = f"{self.mqtt_topic}/{ieee_address}/set"
         async with self._device_lock(self._send_locks, ieee_address):
             wait = self._next_send_at.get(ieee_address, 0.0) - time.monotonic()
             if wait > 0:
                 await asyncio.sleep(wait)
             if "c4_cmd" in payload:
-                LOGGER.info("MQTT -> %s: %s", state.friendly_name, payload["c4_cmd"])
+                LOGGER.info("MQTT -> %r: %r", state.friendly_name, payload["c4_cmd"])
             try:
                 await mqtt.async_publish(self._hass, topic, json.dumps(payload), qos=1)
             finally:
@@ -1958,6 +2574,32 @@ def _click_count_to_event_type(count: int) -> str:
     return _CLICK_COUNT_MAP[min(max(count, 1), max(_CLICK_COUNT_MAP))]
 
 
+_ACTION_FIELDS = ("tap_action", "double_tap_action", "hold_action")
+
+
+def _cmd_color(value: Any, state: DeviceState, what: str) -> str | None:
+    """Return a color fit for a c4_cmd string, or None (logged) if invalid."""
+    color = valid_hex(value)
+    if color is None:
+        LOGGER.error(
+            "Not sending invalid %s color %r to %r", what, value, state.friendly_name
+        )
+    return color
+
+
+def _strip_action_data(config_dict: dict[str, Any]) -> dict[str, Any]:
+    """Return a device config dict with every slot action's data removed."""
+    slots = []
+    for slot in config_dict.get("slots", []):
+        slot_copy = dict(slot)
+        for field in _ACTION_FIELDS:
+            action = slot_copy.get(field)
+            if isinstance(action, dict) and "data" in action:
+                slot_copy[field] = {k: v for k, v in action.items() if k != "data"}
+        slots.append(slot_copy)
+    return {**config_dict, "slots": slots}
+
+
 def _color_eq(a: str, b: str) -> bool:
     """Compare two hex colors case-insensitively, ignoring a leading #."""
     return a.lstrip("#").lower() == b.lstrip("#").lower()
@@ -1980,28 +2622,46 @@ def _extract_slot_fields(
     return led, btn
 
 
+def _str_field(data: Any, key: str) -> str:
+    """Return data[key] if data is a dict and the value a string, else ""."""
+    value = data.get(key) if isinstance(data, dict) else None
+    return value if isinstance(value, str) else ""
+
+
+def _valid_friendly_name(name: Any) -> bool:
+    """
+    Return whether a Zigbee2MQTT friendly name is safe to use.
+
+    It becomes part of an MQTT topic and of log lines, so MQTT wildcards
+    and control characters are refused.
+    """
+    if not isinstance(name, str) or not 0 < len(name) <= _FRIENDLY_NAME_MAX:
+        return False
+    if "+" in name or "#" in name:
+        return False
+    return all(ord(ch) >= 0x20 and ord(ch) != 0x7F for ch in name)  # noqa: PLR2004
+
+
 def _is_outlet(device_info: dict) -> bool:
     """Check if a Z2M device info dict is a Control4 outlet relay (ROS)."""
-    model = (device_info.get("definition") or {}).get("model", "")
+    model = _str_field(device_info.get("definition"), "model")
     # Z2M's model_id is the raw Zigbee modelID, e.g.
     # "c4:control4_light:C4-V-ROSW120".
-    model_id = device_info.get("model_id", "").rsplit(":", 1)[-1]
+    model_id = _str_field(device_info, "model_id").rsplit(":", 1)[-1]
     return model in OUTLET_MODELS or model_id in OUTLET_MODELS
 
 
 def _is_control4_device(device_info: dict) -> bool:
     """Check if a Z2M device info dict is a Control4 device."""
-    definition = device_info.get("definition") or {}
+    definition = device_info.get("definition")
     c4 = C4_MANUFACTURER_NAME.lower()
     # Z2M uses "vendor" in definition, but check both for safety
     for key in ("vendor", "manufacturer"):
-        if c4 in definition.get(key, "").lower():
+        if c4 in _str_field(definition, key).lower():
             return True
     # Top-level "manufacturer" field
-    if c4 in device_info.get("manufacturer", "").lower():
+    if c4 in _str_field(device_info, "manufacturer").lower():
         return True
-    model = definition.get("model", "")
-    if model in C4_MODEL_IDS:
+    if _str_field(definition, "model") in C4_MODEL_IDS:
         return True
-    model_id = device_info.get("model_id", "")
-    return model_id in C4_MODEL_IDS
+    return _str_field(device_info, "model_id") in C4_MODEL_IDS

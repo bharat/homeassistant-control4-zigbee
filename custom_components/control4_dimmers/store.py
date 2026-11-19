@@ -7,15 +7,108 @@ from typing import TYPE_CHECKING, Any
 from homeassistant.helpers.storage import Store
 
 from .const import (
+    DEVICE_TYPE_OUTLET,
+    DEVICE_TYPE_SLOTS,
+    DEVICE_TYPES,
     LOGGER,
+    SLOT_COUNT,
     SNAPSHOT_STORAGE_KEY,
     STORAGE_KEY,
+    STORAGE_MINOR_VERSION,
     STORAGE_VERSION,
 )
-from .models import DeviceConfig, SlotConfig
+from .models import DeviceConfig, SlotConfig, valid_hex
 
 if TYPE_CHECKING:
     from homeassistant.core import HomeAssistant
+
+
+DEFAULT_LED_ON_COLOR = "0000ff"
+DEFAULT_LED_OFF_COLOR = "000000"
+SELF_LOAD_SENTINEL = "__self_load__"
+_ACTION_FIELDS = ("tap_action", "double_tap_action", "hold_action")
+
+
+def sanitize_device_config(
+    config: DeviceConfig, fallback_type: str | None = None
+) -> list[str]:
+    """
+    Repair stored values that would be unsafe to act on; return what changed.
+
+    Stored config can predate input validation, come from a hand-edited
+    file, or be replayed from a snapshot. Colors are spliced into firmware
+    commands and the card's styles, slot ids into selectors, and sizes into
+    layout loops, so each is checked here: invalid colors fall back to the
+    defaults, a slot size is clamped to what the device type can hold, slots
+    whose id is not an integer 1..6 are dropped, and unknown types are
+    cleared. fallback_type is used for the slot limits when the config has
+    no type of its own.
+    """
+    fixes: list[str] = []
+    if config.device_type_override not in (None, *DEVICE_TYPES):
+        fixes.append(f"device_type_override {config.device_type_override!r}")
+        config.device_type_override = None
+    if config.device_type and config.device_type not in (
+        *DEVICE_TYPES,
+        DEVICE_TYPE_OUTLET,
+    ):
+        fixes.append(f"device_type {config.device_type!r}")
+        config.device_type = ""
+    for attr in ("faceplate_color", "backlight_color"):
+        value = getattr(config, attr)
+        if value is None or value == "":
+            continue
+        clean = valid_hex(value)
+        if clean != value:
+            if clean is None:
+                fixes.append(f"{attr} {value!r}")
+            setattr(config, attr, clean)
+
+    allowed = DEVICE_TYPE_SLOTS.get(config.effective_type or fallback_type or "")
+    max_slot = max(allowed) if allowed else SLOT_COUNT
+    slots: list[SlotConfig] = []
+    for slot in config.slots:
+        sid = slot.slot_id
+        if isinstance(sid, bool) or not isinstance(sid, int):
+            fixes.append(f"slot_id {sid!r}")
+            continue
+        if not 1 <= sid <= SLOT_COUNT:
+            fixes.append(f"slot_id {sid!r}")
+            continue
+        _sanitize_slot(slot, max(1, max_slot - sid + 1), fixes)
+        slots.append(slot)
+    config.slots = slots
+    return fixes
+
+
+def _sanitize_slot(slot: SlotConfig, max_size: int, fixes: list[str]) -> None:
+    """Clamp one slot's size and repair its colors and actions in place."""
+    size = slot.size
+    if isinstance(size, bool) or not isinstance(size, int) or size < 1:
+        fixes.append(f"slot {slot.slot_id} size {size!r}")
+        slot.size = 1
+    elif size > max_size:
+        fixes.append(f"slot {slot.slot_id} size {size!r}")
+        slot.size = max_size
+    for attr, default in (
+        ("led_on_color", DEFAULT_LED_ON_COLOR),
+        ("led_off_color", DEFAULT_LED_OFF_COLOR),
+    ):
+        value = getattr(slot, attr)
+        clean = valid_hex(value)
+        if clean is None:
+            fixes.append(f"slot {slot.slot_id} {attr} {value!r}")
+            setattr(slot, attr, default)
+        elif clean != value:
+            setattr(slot, attr, clean)
+    for attr in _ACTION_FIELDS:
+        value = getattr(slot, attr)
+        if value not in (None, SELF_LOAD_SENTINEL) and not isinstance(value, dict):
+            fixes.append(f"slot {slot.slot_id} {attr}")
+            setattr(slot, attr, None)
+    if not isinstance(slot.name, str):
+        fixes.append(f"slot {slot.slot_id} name")
+        slot.name = ""
 
 
 class Control4Store:
@@ -23,8 +116,15 @@ class Control4Store:
 
     def __init__(self, hass: HomeAssistant, entry_id: str) -> None:
         """Initialize the store."""
+        # Minor 1.1 -> 1.2 needs no reshaping, so there is no migrate
+        # function: Home Assistant hands same-major data through unchanged,
+        # and async_load runs every stored value through
+        # sanitize_device_config, which is what 1.2 introduced.
         self._store = Store[dict[str, Any]](
-            hass, STORAGE_VERSION, f"{STORAGE_KEY}.{entry_id}"
+            hass,
+            STORAGE_VERSION,
+            f"{STORAGE_KEY}.{entry_id}",
+            minor_version=STORAGE_MINOR_VERSION,
         )
         self._devices: dict[str, DeviceConfig] = {}
         # Named snapshots of device configs, kept in a separate HA Store so
@@ -49,7 +149,10 @@ class Control4Store:
         if not stored or not isinstance(stored, dict):
             return
         for ieee, data in stored.get("devices", {}).items():
-            self._devices[ieee] = DeviceConfig.from_dict(data)
+            try:
+                self._devices[ieee] = DeviceConfig.from_dict(data)
+            except (KeyError, TypeError, ValueError, AttributeError) as err:
+                LOGGER.error("Dropping unreadable stored config for %r: %r", ieee, err)
 
         # One-time migration: convert legacy behavior fields to action dicts
         migrated = False
@@ -59,6 +162,18 @@ class Control4Store:
                     migrated = True
         if migrated:
             LOGGER.info("Migrated legacy behavior configs to action system")
+
+        repaired = False
+        for ieee, config in self._devices.items():
+            fixes = sanitize_device_config(config)
+            if fixes:
+                repaired = True
+                LOGGER.warning(
+                    "Repaired invalid stored config for %r: %s",
+                    ieee,
+                    ", ".join(fixes),
+                )
+        if migrated or repaired:
             await self.async_save()
 
     async def _load_snapshots(self) -> None:

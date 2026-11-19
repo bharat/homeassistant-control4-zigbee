@@ -21,6 +21,10 @@ from custom_components.control4_dimmers.models import (
     SlotConfig,
 )
 
+from .conftest import fake_entity_registry
+
+SLOT_LED_IEEE = "0x000fff0000aabb01"
+
 
 class TestGetRuntime:
     """Tests for the _get_runtime helper."""
@@ -180,7 +184,7 @@ class TestSetSlotLedService:
         mock_hass: MagicMock,
         initial_slot: SlotConfig,
     ) -> tuple[MagicMock, Control4Manager, DeviceConfig]:
-        ieee = "0xAABB"
+        ieee = SLOT_LED_IEEE
         entry = MagicMock()
         entry.data = {"mqtt_topic": "zigbee2mqtt"}
         entry.options = {}
@@ -196,6 +200,9 @@ class TestSetSlotLedService:
         mgr = Control4Manager(mock_hass, entry, store)
         mgr._devices[ieee] = DeviceState(ieee_address=ieee, friendly_name="Test Keypad")
         mock_hass.data = {DOMAIN: {"entry1": {"manager": mgr, "store": store}}}
+        fake_entity_registry(mock_hass).add(
+            "event.test_button_2", f"{ieee}_event_{initial_slot.slot_id}"
+        )
         # Mock the event entity's state with the attributes the service
         # expects (ieee_address and slot_id).
         entity_state = MagicMock()
@@ -300,10 +307,8 @@ class TestSetSlotLedService:
     async def test_unknown_slot_is_noop(self, mock_hass: MagicMock) -> None:
         initial = SlotConfig(slot_id=2, behavior="keypad", led_mode="fixed")
         _, mgr, _ = self._setup(mock_hass, initial)
-        # Override the entity's slot_id to one that isn't in the config.
-        entity_state = MagicMock()
-        entity_state.attributes = {"ieee_address": "0xAABB", "slot_id": 99}
-        mock_hass.states.get.return_value = entity_state
+        # An event entity for a slot that isn't in the config.
+        fake_entity_registry(mock_hass).add("event.test", f"{SLOT_LED_IEEE}_event_6")
         with patch.object(mgr, "_push_single_slot", new_callable=AsyncMock) as push:
             call = MagicMock()
             call.data = {"entity_id": "event.test", "led_mode": "fixed"}
