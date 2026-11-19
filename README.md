@@ -30,7 +30,7 @@ Pairs with a Zigbee2MQTT stack that speaks the Control4 protocol natively
 
 ## Devices
 
-Every Control4 Zigbee device we know of, grouped by what it does. Model numbers come from Control4's data sheets; where Control4 publishes one, the model number links to it.
+Every Control4 Zigbee device we know of, grouped by what it does. Model numbers come from Control4's data sheets; where Control4 publishes one, the model number links to it (or to the setup guide when there is no data sheet).
 
 - **Status**: **Confirmed** (maintainer-tested), **Community confirmed**, **Likely** (a restyled version of a confirmed model with the same specs, not tested yet), **Unknown** (nobody has reported trying it with Zigbee2MQTT yet) or **Not supported**.
 - **Voltage variants**: models that differ only in the number at the end (120, 240, 277 or 120277) are the same device built for a different mains voltage, so they share one row. The status comes from whichever voltage has been tested, usually the 120V model.
@@ -131,8 +131,8 @@ Control4 doesn't make its own Zigbee shades. This interface is the only shade ha
 | Model | Status | Type | Zigbee role |
 | ------- | ------- | ------ | -------- |
 | [C4-SR260 (SR-260)](https://docs.control4.com/docs/product/system-remote-control-sr-260/data-sheet/english/latest) | **Unknown** | System Remote Control | End device |
-| SR-250 | **Unknown** | System Remote Control | End device (expected) |
-| C4-SR150B-Z-B (SR-150) | **Unknown** | System Remote Control | End device (expected) |
+| [C4-SR250B-Z-B (SR-250)](https://docs.control4.com/docs/product/system-remote-control-sr-250/setup-guide/english/latest) | **Unknown** | System Remote Control (4 AA batteries; setup guide, no data sheet) | End device (expected) |
+| [C4-SR150B-Z-B (SR-150)](https://docs.control4.com/docs/product/system-remote-control-sr-150/setup-guide/english/latest) | **Unknown** | System Remote Control (4 AAA batteries; setup guide, no data sheet) | End device (expected) |
 
 ### Sensors and I/O
 
