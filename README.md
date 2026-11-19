@@ -70,6 +70,19 @@ The Contemporary (`-C`) versions of the models above. Their data sheets describe
 
 </details>
 
+#### Auxiliary keypads
+
+Auxiliary keypads have no radio. They wire to a dimmer, switch or fan controller over the existing 3-way wiring and talk to it over those wires, so they work through that device: its paddle events fire when the auxiliary is pressed (see [Paddle events and 3-way auxiliary switches](#paddle-events-and-3-way-auxiliary-switches)). Up to 10 can share one device. The Lux auxiliary also lists the APD, FPD, KD and SW above as compatible.
+
+<details><summary>Show table</summary>
+
+| Model | Status | Type | Zigbee role |
+| ------- | ------- | ------ | -------- |
+| [C4-KA](https://docs.control4.com/docs/product/auxiliary-keypad/data-sheet/english/latest) | **Community confirmed** (through its main device) | Auxiliary Keypad | None (no radio) |
+| [C4-L-KA](https://help.snapone.com/lux-qs/Content/156_24_LuxLighting_SpecSheet_C4-L-KA.pdf) | **Likely** (through its main device) | Lux Auxiliary Keypad | None (no radio) |
+
+</details>
+
 #### Other dimmers and fan controllers
 
 <details><summary>Show table</summary>
@@ -199,7 +212,6 @@ These are often mistaken for Control4 Zigbee devices, but have nothing for this 
 | ------- | ------- | ------ | -------- |
 | [C4-HALO-BL](https://docs.control4.com/docs/product/halo-remote/data-sheet/english/latest), [C4-HALO-TS-*](https://docs.control4.com/docs/product/halo-remote-touch/data-sheet/english/latest) | **Not supported** | Halo and Halo Touch remotes | Wi-Fi, no Zigbee radio |
 | [Neeo](https://docs.control4.com/docs/product/neeo-remote/data-sheet/english/latest) | **Not supported** | Neeo Remote | Wi-Fi, no Zigbee radio |
-| [C4-KA, C4-L-KA](https://docs.control4.com/docs/product/auxiliary-keypad/data-sheet/english/latest) | **Not supported** | Auxiliary Keypad | No radio. It connects to a dimmer, switch or fan controller over the 3-way wiring, and that device reports its presses (see [Paddle events and 3-way auxiliary switches](#paddle-events-and-3-way-auxiliary-switches)) |
 | [C4-L-KCB](https://help.snapone.com/lux-qs/Content/156_24_LuxLighting_SpecSheet_C4-L-KCB.pdf) | **Not supported** | Lux Wired Keypad | Wired (RS-485), no Zigbee radio |
 | Somfy, QMotion, Yale, Kwikset and other "works with Control4" devices | **Not supported** | Third-party shades and locks | Standard Zigbee 3.0 or Zigbee Home Automation, not the Control4 protocol. Pair them with Zigbee2MQTT directly |
 
