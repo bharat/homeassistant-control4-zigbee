@@ -53,7 +53,13 @@ To move a device to a new Zigbee mesh, use the **13-4-13** factory reset sequenc
 
 The switch works on/off through a `switch` entity (no brightness slider). Units that answer the dim probe are recognised automatically; the rest need `set_device_type` with `switch` (see Troubleshooting).
 
-All newer Control4 Zigbee devices with manufacturer ID `43981` (`0xABCD`) are expected to work, including these Contemporary (`-C`) versions of the models above. Their data sheets describe the same features and load ratings as the originals with a new design and faceplates:
+All newer Control4 Zigbee devices with manufacturer ID `43981` (`0xABCD`) are expected to work.
+
+#### Contemporary versions
+
+The Contemporary (`-C`) versions of the models above. Their data sheets describe the same features and load ratings as the originals with a new design and faceplates:
+
+<details><summary>Show table</summary>
 
 | Model | Status | Type | Zigbee role |
 | ------- | ------- | ------ | -------- |
@@ -62,30 +68,47 @@ All newer Control4 Zigbee devices with manufacturer ID `43981` (`0xABCD`) are ex
 | [C4-KC120277/240-C](https://docs.control4.com/docs/product/wireless-configurable-keypad-contemporary/data-sheet/english/latest) | **Likely** | Configurable Keypad, Contemporary | Router (expected) |
 | [C4-SW120277/240-C](https://docs.control4.com/docs/product/wireless-switch-contemporary/data-sheet/english/latest) | **Likely** | Switch, Contemporary | Router (expected) |
 
+</details>
+
 #### Other dimmers and fan controllers
+
+<details><summary>Show table</summary>
 
 | Model | Status | Type | Zigbee role |
 | ------- | ------- | ------ | -------- |
-| [C4-FPD120](https://docs.control4.com/docs/product/wireless-forward-phase-dimmer/data-sheet/english/latest) | **Unknown** | Forward Phase Dimmer | Router (expected) |
+| [C4-FPD120](https://docs.control4.com/docs/product/wireless-forward-phase-dimmer/data-sheet/english/latest) | **Community confirmed** | Forward Phase Dimmer | Router (expected) |
 | [C4-V-FPD120](https://docs.control4.com/docs/product/essential-forward-phase-dimmer-120v-white/data-sheet/english/latest) | **Unknown** | Essential Forward Phase Dimmer | Router (expected) |
 | [C4-TV120277/240](https://docs.control4.com/docs/product/wireless-0-10v-dimmer/data-sheet/english/latest) | **Unknown** | 0-10V Dimmer | Router (expected) |
 | [C4-TV120277/240-C](https://docs.control4.com/docs/product/wireless-0-10v-dimmer-contemporary/data-sheet/english/latest) | **Unknown** | 0-10V Dimmer, Contemporary | Router (expected) |
 | [C4-4SF120](https://docs.control4.com/docs/product/wireless-fan-speed-controller/data-sheet/english/latest) | **Unknown** | Fan Speed Controller | Router (expected) |
 | [C4-DM201-Z, C4-DM201-LW-Z, C4-SM201-Z](https://docs.control4.com/docs/product/puck-dimmer/data-sheet/english/latest) | **Unknown** | Puck Dimmer and Switch (in-box module, 240V) | Router (expected) |
 
+</details>
+
+The C4-FPD120 behaves like the C4-APD120 (top and bottom buttons, paddle up and down, one dimmable load) and is recognised by its reported model ([bharat/zigbee-herdsman-converters#11](https://github.com/bharat/zigbee-herdsman-converters/pull/11)).
+
 #### Legacy lighting
 
-Control4 replaced these with the models above in 2013 ([migration sheet](https://docs.control4.com/docs/product/migrating-to-next-generation-wireless-lighting/information-sheet/english/latest)). At least the C4-DIM1-Z speaks an older dialect of the text protocol (`c4.dm.` instead of `c4.dmx.`), which the Control4 Zigbee2MQTT image doesn't handle yet.
+Control4 replaced these with the models above in 2013 ([migration sheet](https://docs.control4.com/docs/product/migrating-to-next-generation-wireless-lighting/information-sheet/english/latest)). At least the C4-DIM1-Z speaks an older dialect of the text protocol (`c4.dm.` instead of `c4.dmx.`). The Control4 Zigbee2MQTT image understands it since [bharat/zigbee-herdsman-converters#8](https://github.com/bharat/zigbee-herdsman-converters/pull/8).
+
+<details><summary>Show table</summary>
 
 | Model | Status | Type | Zigbee role |
 | ------- | ------- | ------ | -------- |
-| C4-DIM1-Z, C4-TDIM1-Z, C4-TDIM2-Z, LDZ-101, LDZ-102 | **Unknown** | Wireless Dimmer / ELV Dimmer | Router (expected) |
+| C4-DIM1-Z | **Community confirmed** | Wireless Dimmer | Router (expected) |
+| C4-TDIM1-Z, C4-TDIM2-Z, LDZ-101, LDZ-102 | **Unknown** | Wireless Dimmer / ELV Dimmer | Router (expected) |
 | C4-SW2-Z, LSZ-101-240 | **Unknown** | Wireless Switch | Router (expected) |
 | C4-KP2-Z, C4-KP3-Z, C4-KP6-Z, LSZ-3W1-240, KPZ-3B1-240, KPZ-6B1-240 | **Unknown** | Wireless 2, 3 and 6-button Keypad | Router (expected) |
+
+</details>
+
+The C4-DIM1-Z (community report): on/off and brightness work, and paddle presses and load level are reported. It is currently typed as a keypad dimmer with six slots instead of a dimmer ([#235](https://github.com/bharat/homeassistant-control4-zigbee/issues/235)).
 
 #### Lux
 
 The current Lux line ([spec guide](https://cdn.prod.website-files.com/629926620ba03720384bebb3/682e3e6a69d43b24d7c77270_Control4%20Lux%20Spec%20Guide.pdf)) is listed as Zigbee 3.0 rather than the Zigbee Pro of the models above. Whether it uses the same Control4 text protocol is unknown, so it may need separate work. Each Lux model covers 120-240V on its own, so there are no separate voltage variants (and no 277V versions). The fan controller (C4-L-4SF120) is 120V only.
+
+<details><summary>Show table</summary>
 
 | Model | Status | Type | Zigbee role |
 | ------- | ------- | ------ | -------- |
@@ -100,7 +123,11 @@ The current Lux line ([spec guide](https://cdn.prod.website-files.com/629926620b
 | C4-L-FSW | **Unknown** | Lux Fireplace Switch | Router (expected) |
 | C4-L-4SF120 | **Unknown** | Lux Variable Speed Controller (fan) | Router (expected) |
 
+</details>
+
 ### Outlets
+
+<details><summary>Show table</summary>
 
 | Model | Status | Type | Zigbee role |
 | ------- | ------- | ------ | -------- |
@@ -109,24 +136,36 @@ The current Lux line ([spec guide](https://cdn.prod.website-files.com/629926620b
 | [C4-V-OOSW120](https://docs.control4.com/docs/product/outdoor-plug-in-outlet-switch/data-sheet/english/latest) | **Unknown** | Outdoor Plug-in Outlet Switch | Router (expected) |
 | [LOZ-5D1, LOZ-5S1](https://docs.control4.com/docs/product/wireless-outlet-dimmer/data-sheet/english/latest) | **Unknown** | Wireless Outlet Dimmer and Switch (older plug-in models) | Router (expected) |
 
+</details>
+
 The C4-V-ROSW120 needs the Control4 Zigbee2MQTT image: on/off works through Z2M's own switch entity, and the outlet's button shows up as a `Button 1` event entity (pressed, single tap, ...). It has no ambient light sensor and no LED settings. Older images report it as unsupported.
 
 ### Shades
 
 Control4 doesn't make its own Zigbee shades. This interface is the only shade hardware we know of that joins the Control4 Zigbee Pro network.
 
+<details><summary>Show table</summary>
+
 | Model | Status | Type | Zigbee role |
 | ------- | ------- | ------ | -------- |
 | [Screen Innovations "C4 Zigbee"](https://commercial.screeninnovations.com/accessories/c4-zigbee/) | **Unknown** | Shade motor interface (one per Screen Innovations motor) | Unknown |
 
+</details>
+
 ### Climate
+
+<details><summary>Show table</summary>
 
 | Model | Status | Type | Zigbee role |
 | ------- | ------- | ------ | -------- |
 | [C4-THERM](https://docs.control4.com/docs/product/control4-wireless-thermostat-by-aprilaire/data-sheet/english/latest) | **Unknown** | Wireless Thermostat by Aprilaire (battery or 24VAC powered) | Unknown |
 | [CCZ-T1-W](https://docs.control4.com/docs/product/wireless-thermostat-v2/data-sheet/english/latest) | **Unknown** | Wireless Thermostat (older model, 24VAC with battery backup) | Unknown |
 
+</details>
+
 ### Remotes
+
+<details><summary>Show table</summary>
 
 | Model | Status | Type | Zigbee role |
 | ------- | ------- | ------ | -------- |
@@ -134,7 +173,11 @@ Control4 doesn't make its own Zigbee shades. This interface is the only shade ha
 | [C4-SR250B-Z-B (SR-250)](https://docs.control4.com/docs/product/system-remote-control-sr-250/setup-guide/english/latest) | **Unknown** | System Remote Control (4 AA batteries; setup guide, no data sheet) | End device (expected) |
 | [C4-SR150B-Z-B (SR-150)](https://docs.control4.com/docs/product/system-remote-control-sr-150/setup-guide/english/latest) | **Unknown** | System Remote Control (4 AAA batteries; setup guide, no data sheet) | End device (expected) |
 
+</details>
+
 ### Sensors and I/O
+
+<details><summary>Show table</summary>
 
 | Model | Status | Type | Zigbee role |
 | ------- | ------- | ------ | -------- |
@@ -144,9 +187,13 @@ Control4 doesn't make its own Zigbee shades. This interface is the only shade ha
 | [ZCA-WCS10-R-ZP, ZCA-WCS10-R-EXT-ZP](https://docs.control4.com/docs/product/wireless-contact-relay/data-sheet/english/latest) | **Unknown** | Wireless Contact Relay (relays, contact input and temperature sensor) | Router |
 | [C4-SGB10A-2D-ZP](https://docs.control4.com/docs/product/smart-garage-package/data-sheet/english/latest) | **Unknown** | Smart Garage Door Bundle (Zigbee to IO modules) | Router |
 
+</details>
+
 ### Not supported
 
 These are often mistaken for Control4 Zigbee devices, but have nothing for this integration to talk to.
+
+<details><summary>Show table</summary>
 
 | Model | Status | Type | Why |
 | ------- | ------- | ------ | -------- |
@@ -155,6 +202,8 @@ These are often mistaken for Control4 Zigbee devices, but have nothing for this 
 | [C4-KA, C4-L-KA](https://docs.control4.com/docs/product/auxiliary-keypad/data-sheet/english/latest) | **Not supported** | Auxiliary Keypad | No radio. It connects to a dimmer, switch or fan controller over the 3-way wiring, and that device reports its presses (see [Paddle events and 3-way auxiliary switches](#paddle-events-and-3-way-auxiliary-switches)) |
 | C4-L-KCB | **Not supported** | Lux Wired Keypad | Wired (RS-485), no Zigbee radio |
 | Somfy, QMotion, Yale, Kwikset and other "works with Control4" devices | **Not supported** | Third-party shades and locks | Standard Zigbee 3.0 or Zigbee Home Automation, not the Control4 protocol. Pair them with Zigbee2MQTT directly |
+
+</details>
 
 ## Prerequisites
 
