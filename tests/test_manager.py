@@ -2065,9 +2065,13 @@ class TestMqttDisconnect:
             tracked_manager, "async_send_mqtt", new_callable=AsyncMock
         ) as mock_send:
             await listener(event)
-        mock_send.assert_awaited_once_with(
-            IEEE_DIMMER, {"c4_cmd": "c4.dmx.led 01 05 000000"}
-        )
+        # The override first, then the load-on/load-off colors that keep
+        # the dimmer's own load from repainting it.
+        assert [c.args for c in mock_send.await_args_list] == [
+            (IEEE_DIMMER, {"c4_cmd": "c4.dmx.led 01 05 000000"}),
+            (IEEE_DIMMER, {"c4_cmd": "c4.dmx.led 01 03 000000"}),
+            (IEEE_DIMMER, {"c4_cmd": "c4.dmx.led 01 04 000000"}),
+        ]
 
     @pytest.mark.asyncio
     async def test_reconnect_resends_tracked_leds(
@@ -2086,9 +2090,11 @@ class TestMqttDisconnect:
         ) as mock_send:
             sent = await resync
         assert sent == 1
-        mock_send.assert_awaited_once_with(
-            IEEE_DIMMER, {"c4_cmd": "c4.dmx.led 01 05 ffffff"}
-        )
+        assert [c.args for c in mock_send.await_args_list] == [
+            (IEEE_DIMMER, {"c4_cmd": "c4.dmx.led 01 05 ffffff"}),
+            (IEEE_DIMMER, {"c4_cmd": "c4.dmx.led 01 03 ffffff"}),
+            (IEEE_DIMMER, {"c4_cmd": "c4.dmx.led 01 04 ffffff"}),
+        ]
         tracked_manager._hass.states.get.assert_called_with("light.kitchen")
 
     def test_repeated_connected_reports_resync_once(
