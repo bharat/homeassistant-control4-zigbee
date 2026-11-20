@@ -353,7 +353,7 @@ The device pushes a reading when its load changes (on, off, or a new level), so 
 | Cold start time | ms |
 | Cold start level | % |
 
-The integration reads each device's dimming table once and Zigbee2MQTT keeps the values, so restarting HA doesn't read them again (a device that has never answered the read is asked again after each restart). Changing a setting writes it to the device and reads it back. Only dimmers and keypad dimmers get dimming settings: relay switches (C4-SW120277), keypads and the outlet have no load to dim.
+The integration reads each device's dimming table once and Zigbee2MQTT keeps the values, so restarting HA doesn't read them again (a device that has never answered the read is asked again after each restart). Changing a setting writes it to the device and reads it back. After a restart or integration reload, each setting shows its last value until the device reports again. Only dimmers and keypad dimmers get dimming settings: relay switches (C4-SW120277), keypads and the outlet have no load to dim.
 
 ### Troubleshooting
 

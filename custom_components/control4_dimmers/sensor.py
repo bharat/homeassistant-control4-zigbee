@@ -27,7 +27,6 @@ from homeassistant.const import (
     UnitOfElectricPotential,
     UnitOfPower,
 )
-from homeassistant.helpers import entity_registry as er
 
 from .const import DEVICE_TYPE_OUTLET, DOMAIN, LOGGER
 
@@ -112,22 +111,24 @@ async def async_setup_entry(
     known_anchors: set[str] = set()
     known_ambient: set[str] = set()
     known_load: set[str] = set()
-    registry = er.async_get(hass)
 
     # One integration-level coverage sensor per entry (issue #199).
     async_add_entities([Control4AuditSensor(manager, entry.entry_id)])
 
     def _has_load(ieee: str, state: DeviceState) -> bool:
+        # Readings are only held in memory and can't be polled, so after a
+        # reload the registry is what remembers that this device has a load.
+        # The type isn't known yet then either (it arrives in the device's
+        # state), so the registry alone decides until it is.
+        registered = manager.is_registered("sensor", f"{ieee}_c4_load_power")
+        if manager.effective_type(ieee) is None:
+            return registered
         # Only device types that drive a load get load sensors, so a stray
         # (or forged) c4_load_power on a keypad does not register seven
         # sensors for good.
         if not manager.has_load(ieee):
             return False
-        # Readings are only held in memory and can't be polled, so after a reload
-        # the registry is what remembers that this device has a load.
-        return "c4_load_power" in state.raw or bool(
-            registry.async_get_entity_id("sensor", DOMAIN, f"{ieee}_c4_load_power")
-        )
+        return "c4_load_power" in state.raw or registered
 
     def _check_new_devices() -> None:
         new_entities: list[SensorEntity] = []

@@ -40,6 +40,8 @@ async def _setup(
     registry = MagicMock()
     registry.async_get_entity_id.return_value = registered
     hass.data = {DOMAIN: {"entry": {"manager": manager}}, er.DATA_REGISTRY: registry}
+    # The manager looks entities up in its own hass's registry.
+    manager._hass.data[er.DATA_REGISTRY] = registry
     entry = MagicMock(entry_id="entry")
     added: list = []
     await setup(hass, entry, added.extend)
