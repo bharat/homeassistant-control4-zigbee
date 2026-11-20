@@ -49,9 +49,9 @@ To move a device to a new Zigbee mesh, use the **13-4-13** factory reset sequenc
 | [C4-APD120/240/277](https://docs.control4.com/docs/product/wireless-adaptive-phase-dimmer/data-sheet/english/latest) | **Confirmed** | Adaptive Phase Dimmer | Yes | Yes | 2 (rocker) | Router |
 | [C4-KD120/240/277](https://docs.control4.com/docs/product/wireless-keypad-dimmer/data-sheet/english/latest) | **Confirmed** | Keypad Dimmer | Yes | Yes | 6 (rocker + keypad) | Router |
 | [C4-KC120277/240](https://docs.control4.com/docs/product/wireless-configurable-keypad/data-sheet/english/latest) | **Confirmed** | Configurable Keypad | N/A | Yes | 6 (configurable slots) | Router |
-| [C4-SW120277/240](https://docs.control4.com/docs/product/wireless-switch-120v-277v/data-sheet/english/latest) | **Community confirmed** | Switch (on/off) | No | Untested | 2 (rocker) | Router |
+| [C4-SW120277/240](https://docs.control4.com/docs/product/wireless-switch-120v-277v/data-sheet/english/latest) | **Community confirmed** | Switch (on/off) | No | Top only | 2 (rocker) | Router |
 
-The switch works on/off through a `switch` entity (no brightness slider). Units that answer the dim probe are recognised automatically; the rest need `set_device_type` with `switch` (see Troubleshooting).
+The switch works on/off through a `switch` entity (no brightness slider). Units that answer the dim probe are recognised automatically; the rest need `set_device_type` with `switch` (see Troubleshooting). Its LEDs work on the hardware (community report), but only the top LED can be set from Home Assistant: the integration sends the bottom button's color to LED 05, while the rocker's bottom LED is LED 04.
 
 All newer Control4 Zigbee devices with manufacturer ID `43981` (`0xABCD`) are expected to work.
 
