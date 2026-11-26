@@ -216,6 +216,7 @@ These are often mistaken for Control4 Zigbee devices, but have nothing for this 
 | [C4-HALO-BL](https://docs.control4.com/docs/product/halo-remote/data-sheet/english/latest), [C4-HALO-TS-*](https://docs.control4.com/docs/product/halo-remote-touch/data-sheet/english/latest) | **Not supported** | Halo and Halo Touch remotes | Wi-Fi, no Zigbee radio |
 | [Neeo](https://docs.control4.com/docs/product/neeo-remote/data-sheet/english/latest) | **Not supported** | Neeo Remote | Wi-Fi, no Zigbee radio |
 | [C4-L-KCB](https://help.snapone.com/lux-qs/Content/156_24_LuxLighting_SpecSheet_C4-L-KCB.pdf) | **Not supported** | Lux Wired Keypad | Wired (RS-485), no Zigbee radio |
+| [C4-MSW](https://www.control4.com/docs/product/mechanical-switch/data-sheet/english/latest), C4-MSW-C, [C4-L-MSW](https://help.snapone.com/lux-qs/Content/LuxMechanicalSwitchInstallagionGuide.pdf) | **Not supported** | Mechanical Switch, in original, Contemporary and Lux styles (sold only in packs: 10 for the original and Contemporary, 5 for Lux) | Plain on/off switch styled to match the other devices, no radio. For control, swap in the Wireless Switch of the same style |
 | Somfy, QMotion, Yale, Kwikset and other "works with Control4" devices | **Not supported** | Third-party shades and locks | Standard Zigbee 3.0 or Zigbee Home Automation, not the Control4 protocol. Pair them with Zigbee2MQTT directly |
 
 </details>
