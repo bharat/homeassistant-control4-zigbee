@@ -275,6 +275,20 @@ class Control4Manager:
         """Return the persistent store."""
         return self._store
 
+    def is_registered(self, domain: str, unique_id: str) -> bool:
+        """
+        Return whether this integration registered an entity before.
+
+        A device's type, load readings and dimming values all arrive in its
+        Zigbee2MQTT state, which is not sent again when only this
+        integration reloads. Until it is, the entity registry is what
+        remembers which entities a device had, so a platform can create
+        them right away instead of leaving them as restored placeholders
+        (shown unavailable, and offered for deletion).
+        """
+        registry = er.async_get(self._hass)
+        return registry.async_get_entity_id(domain, DOMAIN, unique_id) is not None
+
     def add_listener(self, callback: Callable[[], None]) -> Callable[[], None]:
         """Register a callback for state changes. Returns unsubscribe function."""
         self._listeners.append(callback)
@@ -2240,6 +2254,11 @@ class Control4Manager:
             return False
         load_bearing = self._effective_type(device) in LOAD_BEARING_TYPES
         return load_bearing and not self.is_relay(ieee_address)
+
+    def effective_type(self, ieee_address: str) -> str | None:
+        """Return a device's stored type override, else its detected type."""
+        device = self._devices.get(ieee_address)
+        return self._effective_type(device) if device else None
 
     def _effective_type(self, device: DeviceState) -> str | None:
         """Return a device's stored type override, else its detected type."""

@@ -23,6 +23,7 @@ from .const import (
     LOGGER,
     PADDLE_IDS,
     PADDLE_NAMES,
+    SLOT_COUNT,
 )
 
 if TYPE_CHECKING:
@@ -57,10 +58,27 @@ async def async_setup_entry(
         for ieee, state in manager.devices.items():
             config = manager.store.get_device(ieee)
             device_type = config.effective_type if config else state.device_type
-            if not device_type:
-                continue
+            if device_type:
+                slot_ids = DEVICE_TYPE_SLOTS.get(device_type, [])
+                # Load-bearing devices also expose their physical load paddle
+                # halves (issue #117). Pure keypads have no load, so no paddle.
+                paddle_ids = PADDLE_IDS if device_type in LOAD_BEARING_TYPES else []
+            else:
+                # The type arrives in the device's Zigbee2MQTT state, which
+                # is not sent again when only this integration reloads.
+                # Until it does, recreate the entities the device had
+                # before, so they don't sit as restored placeholders.
+                slot_ids = [
+                    slot_id
+                    for slot_id in range(1, SLOT_COUNT + 1)
+                    if manager.is_registered("event", f"{ieee}_event_{slot_id}")
+                ]
+                paddle_ids = [
+                    paddle_id
+                    for paddle_id in PADDLE_IDS
+                    if manager.is_registered("event", f"{ieee}_event_{paddle_id}")
+                ]
             wanted: set[str] = set()
-            slot_ids = DEVICE_TYPE_SLOTS.get(device_type, [])
             for slot_id in slot_ids:
                 key = f"{ieee}_event_{slot_id}"
                 wanted.add(key)
@@ -76,24 +94,23 @@ async def async_setup_entry(
                         slot_id=slot_id,
                     )
                 )
-            # Load-bearing devices also expose their physical load paddle
-            # halves (issue #117). Pure keypads have no load, so no paddle.
-            if device_type in LOAD_BEARING_TYPES:
-                for paddle_id in PADDLE_IDS:
-                    key = f"{ieee}_event_{paddle_id}"
-                    wanted.add(key)
-                    if key in known:
-                        continue
-                    known.add(key)
-                    new_entities.append(
-                        Control4PaddleEvent(
-                            manager=manager,
-                            ieee_address=ieee,
-                            friendly_name=state.friendly_name,
-                            model_id=state.model_id,
-                            paddle_id=paddle_id,
-                        )
+            for paddle_id in paddle_ids:
+                key = f"{ieee}_event_{paddle_id}"
+                wanted.add(key)
+                if key in known:
+                    continue
+                known.add(key)
+                new_entities.append(
+                    Control4PaddleEvent(
+                        manager=manager,
+                        ieee_address=ieee,
+                        friendly_name=state.friendly_name,
+                        model_id=state.model_id,
+                        paddle_id=paddle_id,
                     )
+                )
+            if not device_type:
+                continue
             # A type change (keypaddim -> dimmer, a relay recognized as a
             # switch) shrinks the slot list; drop the entities the old
             # type left behind so they do not linger as restored entities
@@ -209,6 +226,9 @@ class Control4ButtonEvent(EventEntity):
         self._slot_id = slot_id
         self._default_name = f"Button {slot_id}"
         self._custom_name: str | None = None
+        # Whether the device's type was known at the last name sync; the
+        # default slot names depend on it.
+        self._type_known = False
         self._unsub_event: Callable[[], None] | None = None
         self._unsub_listener: Callable[[], None] | None = None
         self._attr_unique_id = f"{ieee_address}_event_{slot_id}"
@@ -338,7 +358,15 @@ class Control4ButtonEvent(EventEntity):
             ent_reg.async_update_entity(self.entity_id, new_entity_id=new_entity_id)
 
     def _sync_name_from_config(self) -> bool:
-        """Update entity name from stored slot config. Return True if changed."""
+        """
+        Update entity name from stored slot config.
+
+        Return True when the name changed in a way the entity_id should
+        follow. A button created before its device's type was known (after
+        a reload, see async_setup_entry) gets its default name only once
+        the type arrives. That is the name it always had, not a rename, so
+        it returns False and the entity_id stays.
+        """
         old_name = self._custom_name
         new_name: str | None = None
 
@@ -348,17 +376,21 @@ class Control4ButtonEvent(EventEntity):
                 if slot_cfg.slot_id == self._slot_id and slot_cfg.name:
                     new_name = slot_cfg.name
                     break
+        from_config = new_name is not None
 
-        if new_name is None:
-            device = self._manager.devices.get(self._ieee)
-            if device and device.device_type:
-                for default_slot in self._manager.get_default_slots(device.device_type):
-                    if default_slot.slot_id == self._slot_id and default_slot.name:
-                        new_name = default_slot.name
-                        break
+        device = self._manager.devices.get(self._ieee)
+        type_known = bool(device and device.device_type)
+        if new_name is None and device and device.device_type:
+            for default_slot in self._manager.get_default_slots(device.device_type):
+                if default_slot.slot_id == self._slot_id and default_slot.name:
+                    new_name = default_slot.name
+                    break
 
+        type_arrived = type_known and not self._type_known
+        self._type_known = type_known
         self._custom_name = new_name
-        return self._custom_name != old_name
+        changed = self._custom_name != old_name
+        return changed and (from_config or not type_arrived)
 
     def _on_button_event(self, event_type: str, context: Context | None) -> None:
         """Handle a button event dispatched by the manager."""
