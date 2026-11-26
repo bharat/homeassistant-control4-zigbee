@@ -363,6 +363,9 @@ def _setup_pair(manager: Control4Manager, dimmer_state: DeviceState) -> None:
     manager._store._devices[IEEE_DIMMER].slots = _pair()
 
 
+LIVING_ROOM = "light.living_room"
+
+
 class TestOptimisticLed:
     """A press updates every LED tracking the same light at once."""
 
@@ -372,7 +375,9 @@ class TestOptimisticLed:
     ) -> None:
         _setup_pair(manager, dimmer_state)
         _target_state(manager, "off")
-        pending = await manager.async_optimistic_led(IEEE_DIMMER, 2, "light.turn_on")
+        pending = await manager.async_optimistic_led(
+            IEEE_DIMMER, 2, "light.turn_on", LIVING_ROOM
+        )
         assert _sent(manager) == [
             "c4.dmx.led 01 05 ffffff",
             "c4.dmx.led 04 05 000000",
@@ -387,7 +392,7 @@ class TestOptimisticLed:
         # Pressing "on" when the light is already on must not flip the LED.
         _setup_pair(manager, dimmer_state)
         _target_state(manager, "on")
-        await manager.async_optimistic_led(IEEE_DIMMER, 2, "light.turn_on")
+        await manager.async_optimistic_led(IEEE_DIMMER, 2, "light.turn_on", LIVING_ROOM)
         assert _sent(manager)[0] == "c4.dmx.led 01 05 ffffff"
 
     @pytest.mark.asyncio
@@ -396,7 +401,9 @@ class TestOptimisticLed:
     ) -> None:
         _setup_pair(manager, dimmer_state)
         _target_state(manager, "on")
-        await manager.async_optimistic_led(IEEE_DIMMER, 5, "light.turn_off")
+        await manager.async_optimistic_led(
+            IEEE_DIMMER, 5, "light.turn_off", LIVING_ROOM
+        )
         # Both LEDs show their off colors (Top's is 0000ff in _tracked_slot).
         assert _sent(manager) == [
             "c4.dmx.led 01 05 0000ff",
@@ -409,7 +416,7 @@ class TestOptimisticLed:
     ) -> None:
         _setup(manager, dimmer_state, _tracked_slot())
         _target_state(manager, "off")
-        await manager.async_optimistic_led(IEEE_DIMMER, 2, "light.toggle")
+        await manager.async_optimistic_led(IEEE_DIMMER, 2, "light.toggle", LIVING_ROOM)
         assert _sent(manager) == ["c4.dmx.led 01 05 ffffff"]
 
     @pytest.mark.asyncio
@@ -421,8 +428,31 @@ class TestOptimisticLed:
             1
         ].led_track_entity_id = "light.other"
         _target_state(manager, "off")
-        await manager.async_optimistic_led(IEEE_DIMMER, 2, "light.turn_on")
+        await manager.async_optimistic_led(IEEE_DIMMER, 2, "light.turn_on", LIVING_ROOM)
         assert _sent(manager) == ["c4.dmx.led 01 05 ffffff"]
+
+    @pytest.mark.asyncio
+    async def test_scene_for_another_light_shows_the_real_state(
+        self, manager: Control4Manager, dimmer_state: DeviceState
+    ) -> None:
+        # A scene may not touch the tracked light, so no "on" guess is
+        # written into the stored colors; the LEDs show its real state.
+        _setup_pair(manager, dimmer_state)
+        manager._store._devices[IEEE_DIMMER].slots[0].tap_action = {
+            "action": "scene.turn_on",
+            "target": {"entity_id": "scene.movie_night"},
+        }
+        _target_state(manager, "off")
+        manager._hass.services.async_call = AsyncMock()
+        await manager.execute_slot_action(IEEE_DIMMER, 2, "tap")
+        assert _sent(manager) == [
+            "c4.dmx.led 01 05 0000ff",
+            "c4.dmx.led 04 05 0000ff",
+            "c4.dmx.led 01 03 0000ff",
+            "c4.dmx.led 01 04 0000ff",
+            "c4.dmx.led 04 03 0000ff",
+            "c4.dmx.led 04 04 0000ff",
+        ]
 
     @pytest.mark.asyncio
     async def test_action_runs_between_overrides_and_load_colors(

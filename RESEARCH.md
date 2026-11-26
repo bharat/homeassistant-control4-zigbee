@@ -596,6 +596,12 @@ the firmware-driven behaviors directly, removing the need for a
 software-side state-listener for push/release flashing and for
 load-tracking on a keypad's own load.
 
+### APD120: Load Changes Repaint Programmed LEDs
+
+The C4-APD120 doesn't keep a mode 05 override the way the KD120 above does. On one C4-APD120 whose top LED tracked another light, reading the top slot (wire 01) back from the firmware gave button behavior `03` (programmable, from `c4.dmx.btn`) and LED behavior `00` (Programmed). Even so, whenever the device's own load turned on or off, the firmware replaced the mode 05 override with the stored mode 03 or mode 04 color, as if the slot were in Follow Load.
+
+To check this on your own unit, read the slot's behavior and LED mode back, set a mode 05 override, then switch the device's own load and see whether the LED keeps the override. For an LED that tracks another entity, the integration writes the tracked color to modes 03 and 04 as well as 05, so a load change repaints it with the same color.
+
 ### c4.dmx.key
 
 `c4.dmx.key` with no arguments is a GET-only device status query. The

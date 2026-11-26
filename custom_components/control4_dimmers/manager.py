@@ -2090,7 +2090,9 @@ class Control4Manager:
 
         load_color_writes: list[tuple[int, str]] = []
         if slot.led_track_entity_id:
-            load_color_writes = await self.async_optimistic_led(ieee, slot_id, service)
+            load_color_writes = await self.async_optimistic_led(
+                ieee, slot_id, service, entity_id or None
+            )
 
         service_data = dict(data)
         if entity_id:
@@ -2105,16 +2107,24 @@ class Control4Manager:
             await self._update_tracked_load_colors(ieee, wire_id, color)
 
     async def async_optimistic_led(
-        self, ieee: str, slot_id: int, service: str | None = None
+        self,
+        ieee: str,
+        slot_id: int,
+        service: str | None = None,
+        target: str | None = None,
     ) -> list[tuple[int, str]]:
         """
         Show the tracked entity's expected new state on the LEDs right away.
 
         The expected state comes from the action: turn_on means on,
         turn_off means off, anything else (a toggle) means the opposite of
-        now. Every LED on the device that tracks the same entity is updated,
-        not only the pressed button's, so a Top/Bottom pair switches
-        together instead of one waiting for the entity's state report.
+        now. That guess is only made when the action targets the tracked
+        entity itself (target, already resolved); any other action, such
+        as a scene or script, may not change it, so the LEDs show its
+        current state instead. Every LED on the device that tracks the
+        same entity is updated, not only the pressed button's, so a
+        Top/Bottom pair switches together instead of one waiting for the
+        entity's state report.
         Only the visible override (mode 05) is sent here, with a cooldown so
         the tracking callback does not repeat it while the action is in
         flight. Returns the (wire_id, color) pairs whose load-on/load-off
@@ -2131,7 +2141,9 @@ class Control4Manager:
             return []
         target_state = self._hass.states.get(track_entity)
         currently_on = target_state is not None and target_state.state == "on"
-        if service and service.endswith(".turn_on"):
+        if target != track_entity:
+            will_be_on = currently_on
+        elif service and service.endswith(".turn_on"):
             will_be_on = True
         elif service and service.endswith(".turn_off"):
             will_be_on = False
