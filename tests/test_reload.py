@@ -221,6 +221,37 @@ class TestDimmingNumbers:
         number._manager.devices[IEEE_DIMMER].raw["c4_tv_01"] = 65
         assert number.native_value == 65
 
+    async def test_number_goes_unavailable_if_the_type_is_not_dimmable(
+        self, hass: HomeAssistant
+    ) -> None:
+        state = _untyped()
+        _manager, added = await _setup(
+            hass,
+            number_async_setup_entry,
+            state,
+            [("number", f"{IEEE_DIMMER}_dimming_01")],
+        )
+        number: Control4DimmingNumber = added[0]
+        assert number.available
+
+        state.device_type = "switch"
+        assert not number.available
+
+    async def test_number_stays_available_if_the_type_is_dimmable(
+        self, hass: HomeAssistant
+    ) -> None:
+        state = _untyped()
+        _manager, added = await _setup(
+            hass,
+            number_async_setup_entry,
+            state,
+            [("number", f"{IEEE_DIMMER}_dimming_01")],
+        )
+        number: Control4DimmingNumber = added[0]
+
+        state.device_type = "dimmer"
+        assert number.available
+
 
 class TestLoadSwitch:
     """Relay load switches."""

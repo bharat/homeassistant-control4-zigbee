@@ -162,6 +162,19 @@ class Control4DimmingNumber(RestoreNumber):
         }
 
     @property
+    def available(self) -> bool:
+        """
+        Return False once the device is known to have no dimming table.
+
+        The registry brings these entities back on a reload before the type
+        is known. A device that then identifies as a relay, keypad or outlet
+        keeps the entity, but unavailable, so it can't send dimming writes.
+        """
+        if self._manager.effective_type(self._ieee) is None:
+            return True
+        return self._manager.has_dimming_table(self._ieee)
+
+    @property
     def native_value(self) -> float | None:
         """Return the value last read from the device, else the restored one."""
         device = self._manager.devices.get(self._ieee)
