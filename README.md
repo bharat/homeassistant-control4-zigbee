@@ -395,15 +395,7 @@ The integration reads each device's dimming table once and Zigbee2MQTT keeps the
   commands on save — they persist across power cycles.
 
 - **Some button LEDs look dimmer than others at the same color**:
-  Community report (observed across a large migrated fleet of dimmers,
-  switches, and keypads): LED brightness appears to track load state.
-  On dimmers and switches, an LED that is lit while the light is off
-  shows dimmer than the same LED lit while the light is on. On keypads
-  it is similar: buttons tied to an actual light have a brighter LED
-  than buttons that run custom actions, such as a programmable button
-  driven by a Home Assistant automation. In that report, changing the
-  LED mode (fixed, push/release, or follow load) or color did not
-  change the behavior, and there is no known brightness command.
+  Community report (observed across a large migrated fleet of dimmers, switches, and keypads): LED brightness was first thought to track load state, but a later side-by-side test points to the individual unit instead. Two C4-APD120 dimmers on firmware 5.1.1, with identical LED colors, dimming settings, and ambient light settings, showed one top LED clearly dimmer than the other while both loads were on. Changing the load level (1% on one, 100% on the other, then the reverse) did not change which LED was dimmer, so load level and wattage don't explain it. This looks like unit-to-unit LED variation or aging. Changing the LED mode (fixed, push/release, or follow load) or color doesn't change it, and there is no known brightness command; the only workaround is to lower the brighter unit's color to match.
 
   Before concluding you are seeing this limitation, compare the
   button's stored on-state and off-state colors (visible in the card
