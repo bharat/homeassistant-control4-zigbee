@@ -33,7 +33,7 @@ Pairs with a Zigbee2MQTT stack that speaks the Control4 protocol natively
 Every Control4 Zigbee device we know of, grouped by what it does. Model numbers come from Control4's data sheets; where Control4 publishes one, the model number links to it (or to the setup guide when there is no data sheet).
 
 - **Status**: **Confirmed** (maintainer-tested), **Community confirmed**, **Likely** (a restyled version of a confirmed model with the same specs, not tested yet), **Unknown** (nobody has reported trying it with Zigbee2MQTT yet) or **Not supported**.
-- **Voltage variants**: models that differ only in the number at the end (120, 240, 277 or 120277) are the same device built for a different mains voltage, so they share one row. The status comes from whichever voltage has been tested, usually the 120V model.
+- **Voltage variants**: models that differ only in the number at the end (120, 240, 277 or 120277) are the same device built for a different mains voltage, so they share one row. The status applies to the voltage that was tested, named in the row; the other voltages are expected to work the same way but are untested.
 - **Zigbee role**: whether the device routes for other devices (Router) or not (End device). "(expected)" means it's inferred from how the device is powered and hasn't been seen on a real network yet.
 
 If you have a device marked **Unknown**, it is recommended you report your experience with it and help expand the capabilities of this integration.
@@ -46,10 +46,10 @@ To move a device to a new Zigbee mesh, use the **13-4-13** factory reset sequenc
 
 | Model | Status | Type | Dimming | LED Control | Buttons | Zigbee role |
 |-------|--------|------|:---:|:---:|:---:|------|
-| [C4-APD120/240/277](https://docs.control4.com/docs/product/wireless-adaptive-phase-dimmer/data-sheet/english/latest) | **Confirmed** | Adaptive Phase Dimmer | Yes | Yes | 2 (rocker) | Router |
-| [C4-KD120/240/277](https://docs.control4.com/docs/product/wireless-keypad-dimmer/data-sheet/english/latest) | **Confirmed** | Keypad Dimmer | Yes | Yes | 6 (rocker + keypad) | Router |
-| [C4-KC120277/240](https://docs.control4.com/docs/product/wireless-configurable-keypad/data-sheet/english/latest) | **Confirmed** | Configurable Keypad | N/A | Yes | 6 (configurable slots) | Router |
-| [C4-SW120277/240](https://docs.control4.com/docs/product/wireless-switch-120v-277v/data-sheet/english/latest) | **Community confirmed** | Switch (on/off) | No | Top only | 2 (rocker) | Router |
+| [C4-APD120/240/277](https://docs.control4.com/docs/product/wireless-adaptive-phase-dimmer/data-sheet/english/latest) | **Confirmed** (C4-APD120; 240V and 277V expected to work, untested) | Adaptive Phase Dimmer | Yes | Yes | 2 (rocker) | Router |
+| [C4-KD120/240/277](https://docs.control4.com/docs/product/wireless-keypad-dimmer/data-sheet/english/latest) | **Confirmed** (C4-KD120; 240V and 277V expected to work, untested) | Keypad Dimmer | Yes | Yes | 6 (rocker + keypad) | Router |
+| [C4-KC120277/240](https://docs.control4.com/docs/product/wireless-configurable-keypad/data-sheet/english/latest) | **Confirmed** (C4-KC120277; 240V expected to work, untested) | Configurable Keypad | N/A | Yes | 6 (configurable slots) | Router |
+| [C4-SW120277/240](https://docs.control4.com/docs/product/wireless-switch-120v-277v/data-sheet/english/latest) | **Community confirmed** (C4-SW120277; 240V expected to work, untested) | Switch (on/off) | No | Top only | 2 (rocker) | Router |
 
 The switch works on/off through a `switch` entity (no brightness slider). Units that answer the dim probe are recognised automatically; the rest need `set_device_type` with `switch` (see Troubleshooting). Its LEDs work on the hardware (community report), but only the top LED can be set from Home Assistant: the integration sends the bottom button's color to LED 05, while the rocker's bottom LED is LED 04.
 
@@ -80,7 +80,7 @@ Auxiliary keypads have no radio. They wire to a dimmer, switch or fan controller
 
 | Model | Status | Type | Zigbee role |
 | ------- | ------- | ------ | -------- |
-| [C4-KA](https://docs.control4.com/docs/product/auxiliary-keypad/data-sheet/english/latest) | **Community confirmed** (through its main device) | Auxiliary Keypad | None (no radio) |
+| [C4-KA](https://docs.control4.com/docs/product/auxiliary-keypad/data-sheet/english/latest) | **Community confirmed** (through its main device, [#193](https://github.com/bharat/homeassistant-control4-zigbee/pull/193)) | Auxiliary Keypad | None (no radio) |
 | [C4-KA-C](https://docs.control4.com/docs/product/auxiliary-keypad-contemporary/data-sheet/english/latest) | **Likely** (through its main device) | Auxiliary Keypad, Contemporary | None (no radio) |
 | [C4-L-KA](https://help.snapone.com/lux-qs/Content/156_24_LuxLighting_SpecSheet_C4-L-KA.pdf) | **Likely** (through its main device) | Lux Auxiliary Keypad | None (no radio) |
 
@@ -111,14 +111,14 @@ Control4 replaced these with the models above in 2013 ([migration sheet](https:/
 
 | Model | Status | Type | Zigbee role |
 | ------- | ------- | ------ | -------- |
-| C4-DIM1-Z | **Community confirmed** | Wireless Dimmer | Router (expected) |
+| C4-DIM1-Z | **Community confirmed** ([bharat/zigbee-herdsman-converters#2](https://github.com/bharat/zigbee-herdsman-converters/pull/2)) | Wireless Dimmer | Router (expected) |
 | C4-TDIM1-Z, C4-TDIM2-Z, LDZ-101, LDZ-102 | **Unknown** | Wireless Dimmer / ELV Dimmer | Router (expected) |
 | C4-SW2-Z, LSZ-101-240 | **Unknown** | Wireless Switch | Router (expected) |
 | C4-KP2-Z, C4-KP3-Z, C4-KP6-Z, LSZ-3W1-240, KPZ-3B1-240, KPZ-6B1-240 | **Unknown** | Wireless 2, 3 and 6-button Keypad | Router (expected) |
 
 </details>
 
-The C4-DIM1-Z (community report): on/off and brightness work, and paddle presses and load level are reported. It is currently typed as a keypad dimmer with six slots instead of a dimmer ([#235](https://github.com/bharat/homeassistant-control4-zigbee/issues/235)).
+The C4-DIM1-Z ([community report](https://github.com/bharat/zigbee-herdsman-converters/pull/2)): on/off and brightness work, and paddle presses and load level are reported. It is currently typed as a keypad dimmer with six slots instead of a dimmer ([#235](https://github.com/bharat/homeassistant-control4-zigbee/issues/235)).
 
 #### Lux
 
